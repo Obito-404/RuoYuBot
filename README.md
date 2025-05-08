@@ -24,7 +24,7 @@
 
 1. 克隆仓库：
 ```bash
-git clone https://github.com/Obito-404/ruoyubot.git
+git clone https://github.com/Obito-404/RuoYuBot.git
 cd ruoyubot
 ```
 
