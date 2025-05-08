@@ -53,6 +53,11 @@ pip install -r requirements.txt
 python main.py
 ```
 
+4. 打包命令：
+```bash
+ pyinstaller --noconfirm --onefile --windowed --name "RuoYuBot" --icon "D:/ruoyubot/icon.ico" --hidden-import comtypes --hidden-import comtypes.stream --hidden-import comtypes.gen --hidden-import win32com --hidden-import win32com.client "D:/ruoyubot/main.py"
+```
+
 ## 依赖说明
 
 主要依赖包：
