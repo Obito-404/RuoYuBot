@@ -13,17 +13,12 @@ import socket
 import queue
 import logging
 from datetime import datetime
-import asyncio
-import aiohttp
 from typing import Dict, List, Optional
 import configparser
 import os
 from pathlib import Path
-import signal
 import sys
 from werkzeug.serving import make_server
-import base64
-import tempfile
 import chardet
 
 try:
