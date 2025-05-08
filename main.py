@@ -346,9 +346,9 @@ class WeChatGUI:
         port_entry = ttk.Entry(local_webhook_frame, textvariable=self.local_port, width=10)
         port_entry.grid(row=0, column=1, padx=(10, 0), sticky=tk.W)
 
-        update_button = ttk.Button(local_webhook_frame, text="更新", command=self.update_webhook_url,
+        self.update_port_button = ttk.Button(local_webhook_frame, text="更新", command=self.update_webhook_url,
                                    style='Button.TButton', width=8)
-        update_button.grid(row=0, column=2, padx=(10, 0))
+        self.update_port_button.grid(row=0, column=2, padx=(10, 0))
 
         # 当前Webhook URL显示
         self.current_webhook_label = ttk.Label(main_frame, textvariable=self.current_webhook_url, style='URL.TLabel')
@@ -798,10 +798,10 @@ class WeChatGUI:
             self.current_webhook_url.set(f"当前Webhook地址: http://{self.local_ip}:{port}/webhook")
 
             # 保存端口到配置文件
-            config.set_webhook_urls(self.external_webhook_urls)
+            config.config['DEFAULT']['port'] = str(port)
             with open(config.config_path, 'w', encoding='utf-8') as f:
                 config.config.write(f)
-            logging.info("端口设置已更新")
+            logging.info(f"端口设置已更新为: {port}")
         except ValueError:
             self.current_webhook_url.set("端口号无效")
             logging.error("输入的端口号无效")
