@@ -21,6 +21,9 @@
 - Python 3.9 或更高版本（仅源码运行需要）
 - 微信 PC 版 3.9.x
 
+##教程
+https://zerotrue.xyz/article/1d6484d9-4c67-80eb-926d-ff6fb1588f60
+
 ## 安装步骤
 
 ### 方式一：直接运行（推荐）
