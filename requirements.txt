@@ -1,0 +1,11 @@
+# 运行依赖
+wxauto>=1.0.0
+requests>=2.31.0
+flask>=2.3.0
+pywin32>=306
+chardet>=5.0.0
+werkzeug>=2.3.0
+
+# 打包依赖
+pyinstaller>=6.3.0
+pyinstaller-hooks-contrib>=2024.0 
