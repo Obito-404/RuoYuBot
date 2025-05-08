@@ -621,7 +621,7 @@ class WeChatGUI:
         # 添加监听对象
         for who in listen_list:
             try:
-                wx.AddListenChat(who=who, savepic=True)
+                wx.AddListenChat(who=who, savepic=False)  # 关闭图片保存功能
                 logging.info(f"已添加监听: {who}")
             except Exception as e:
                 logging.error(f"添加监听 {who} 失败: {str(e)}")
