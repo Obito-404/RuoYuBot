@@ -508,7 +508,7 @@ class WeChatGUI:
                         try:
                             # 检查是否已经在监听列表中
                             if session.name not in self.get_listen_list():
-                                wx.AddListenChat(who=session.name)
+                                wx.AddListenChat(nickname=session.name, callback=self.handle_message_callback)
                                 logging.info(f"已添加新会话监听: {session.name}")
                         except Exception as e:
                             logging.error(f"添加新会话监听失败: {str(e)}")
@@ -614,180 +614,175 @@ class WeChatGUI:
                 logging.error(traceback.format_exc())
                 time.sleep(1)
 
+    def handle_message_callback(self, msg, chat):
+        """处理接收到的消息的回调函数"""
+        try:
+            msgtype = msg.type
+            content = msg.content
+            sender = msg.sender if hasattr(msg, 'sender') else chat.name
+            who = chat.name
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            # 检查是否是重复消息
+            if self.is_duplicate_message(who, sender, content, timestamp):
+                return
+
+            # 处理系统消息
+            if msgtype == 'sys':
+                logging.info(f"【系统消息】{content}")
+                return
+
+            # 处理时间消息
+            if msgtype == 'time':
+                logging.info(f"【时间消息】{msg.time if hasattr(msg, 'time') else content}")
+                return
+
+            # 处理撤回消息
+            if msgtype == 'recall':
+                logging.info(f"【撤回消息】{content}")
+                return
+
+            # 已发送的消息
+            if msgtype == 'self':
+                logging.info(f"【已发送的消息】{content}")
+                return
+
+            # 获取自己的昵称用于@检测
+            my_nickname = wx.nickname
+            AtMe = "@" + my_nickname
+
+            # 判断是否是群聊（发送人和窗口名字不同）
+            is_group = sender != who
+
+            if is_group:
+                # 检查是否被@
+                is_at_me = AtMe in content or my_nickname in content
+                # 检查是否是自己的回复消息
+                if "收到你的消息:" in content:
+                    logging.info(f"忽略自己的回复消息: {content}")
+                    return
+
+                logging.info(f"消息内容: {content}")
+
+                if is_at_me:
+                    logging.info(f"在群 {who} 中被 {sender} @了，消息内容: {content}")
+                    try:
+                        # 发送到所有webhook
+                        data = {
+                            "target_user": who,
+                            "message": content,
+                            "timestamp": timestamp,
+                            "is_group": True,
+                            "sender": sender,
+                            "chat_name": who,
+                            "is_at_me": True
+                        }
+
+                        # 发送到所有配置的webhook地址
+                        for webhook_url in self.external_webhook_urls:
+                            try:
+                                response = requests.post(
+                                    webhook_url,
+                                    json=data,
+                                    headers={'Content-Type': 'application/json'}
+                                )
+
+                                if response.status_code == 200:
+                                    logging.info(f"群@消息已成功发送到webhook: {webhook_url}")
+                                else:
+                                    logging.error(f"发送群@消息到webhook失败，状态码: {response.status_code}")
+                                    logging.error(f"响应内容: {response.text}")
+                            except Exception as e:
+                                logging.error(f"发送到webhook {webhook_url} 失败: {str(e)}")
+
+                    except Exception as e:
+                        logging.error(f"处理群@消息失败: {str(e)}")
+                        logging.error(traceback.format_exc())
+                else:
+                    # 群消息未被@，只记录日志
+                    logging.info(f"收到来自群 {who} 的消息，发送者: {sender}, 内容: {content}，未被@，忽略处理")
+            else:
+                # 私聊消息
+                logging.info(f"收到来自 {who} 的私聊消息: {content}")
+                try:
+                    data = {
+                        "target_user": who,
+                        "message": content,
+                        "timestamp": timestamp,
+                        "is_group": False,
+                        "chat_name": who
+                    }
+
+                    # 发送到所有配置的webhook地址
+                    for webhook_url in self.external_webhook_urls:
+                        try:
+                            response = requests.post(
+                                webhook_url,
+                                json=data,
+                                headers={'Content-Type': 'application/json'}
+                            )
+
+                            if response.status_code == 200:
+                                logging.info(f"私聊消息已成功发送到webhook: {webhook_url}")
+                            else:
+                                logging.error(f"发送到webhook失败，状态码: {response.status_code}")
+                                logging.error(f"响应内容: {response.text}")
+                        except Exception as e:
+                            logging.error(f"发送到webhook {webhook_url} 失败: {str(e)}")
+
+                except Exception as e:
+                    logging.error(f"发送到webhook失败: {str(e)}")
+                    logging.error(traceback.format_exc())
+
+        except Exception as e:
+            logging.error(f"处理消息回调时出错: {str(e)}")
+            logging.error(traceback.format_exc())
+
     def message_listener(self):
         # 获取监听对象列表
         listen_list = self.get_listen_list()
-
-        # 添加监听对象
-        for who in listen_list:
-            try:
-                wx.AddListenChat(who=who, savepic=False)  # 关闭图片保存功能
-                logging.info(f"已添加监听: {who}")
-            except Exception as e:
-                logging.error(f"添加监听 {who} 失败: {str(e)}")
-
-        logging.info("开始监听消息...")
 
         # 启动消息队列处理线程
         queue_thread = threading.Thread(target=self.process_message_queue)
         queue_thread.daemon = True
         queue_thread.start()
 
-        # 获取自己的昵称用于@检测
+        # 获取自己的昵称
         my_nickname = wx.nickname
-        AtMe = "@" + my_nickname
         logging.info(f"我的昵称: {my_nickname}")
 
-        # 首次获取消息，清空历史消息
-        logging.info("正在清空历史消息...")
+        # 添加监听对象（使用新的API）
+        for who in listen_list:
+            try:
+                wx.AddListenChat(nickname=who, callback=self.handle_message_callback)
+                logging.info(f"已添加监听: {who}")
+            except Exception as e:
+                logging.error(f"添加监听 {who} 失败: {str(e)}")
+
+        logging.info("开始监听消息...")
+
+        # 启动监听
         try:
-            wx.GetListenMessage()
-            time.sleep(1)  # 等待一下确保消息被清空
+            wx.StartListening()
+            logging.info("监听已启动")
         except Exception as e:
-            logging.error(f"清空历史消息时出错: {str(e)}")
-        logging.info("历史消息已清空，开始监听新消息...")
+            logging.error(f"启动监听失败: {str(e)}")
 
-        # 用于记录上次处理的消息时间戳
-        last_message_time = time.time()
-
+        # 保持运行
         while self.is_running:
             try:
-                msgs = wx.GetListenMessage()
-                current_time = time.time()
-
-                # 如果距离上次处理消息时间太短，跳过这次处理
-                if current_time - last_message_time < 0.5:  # 500毫秒
-                    time.sleep(0.1)
-                    continue
-
-                for chat in msgs:
-                    who = chat.who
-                    messages = msgs.get(chat)
-
-                    for msg in messages:
-                        msgtype = msg.type
-                        content = msg.content
-                        sender = msg.sender if hasattr(msg, 'sender') else who
-                        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-
-                        # 检查是否是重复消息
-                        if self.is_duplicate_message(who, sender, content, timestamp):
-                            continue
-
-                        # 更新最后处理消息的时间
-                        last_message_time = current_time
-
-                        # 处理系统消息
-                        if msgtype == 'sys':
-                            logging.info(f"【系统消息】{content}")
-                            continue
-
-                        # 处理时间消息
-                        if msgtype == 'time':
-                            logging.info(f"【时间消息】{msg.time}")
-                            continue
-
-                        # 处理撤回消息
-                        if msgtype == 'recall':
-                            logging.info(f"【撤回消息】{msg.content}")
-                            continue
-
-                        # 已发送的消息
-                        if msgtype == 'self':
-                            # 只记录日志，不处理
-                            logging.info(f"【已发送的消息】{content}")
-                            continue
-
-                        # 判断是否是群聊（发送人和窗口名字不同）
-                        is_group = sender != who
-
-                        if is_group:
-                            # 检查是否被@
-                            is_at_me = AtMe in content or my_nickname in content
-                            # 检查是否是自己的回复消息
-                            if "收到你的消息:" in content:
-                                logging.info(f"忽略自己的回复消息: {content}")
-                                continue
-
-                            logging.info(f"消息内容: {content}")
-
-                            if is_at_me:
-                                logging.info(f"在群 {who} 中被 {sender} @了，消息内容: {content}")
-                                try:
-                                    # 发送到所有webhook
-                                    data = {
-                                        "target_user": who,
-                                        "message": content,
-                                        "timestamp": timestamp,
-                                        "is_group": True,
-                                        "sender": sender,
-                                        "chat_name": who,
-                                        "is_at_me": True
-                                    }
-
-                                    # 发送到所有配置的webhook地址
-                                    for webhook_url in self.external_webhook_urls:
-                                        try:
-                                            response = requests.post(
-                                                webhook_url,
-                                                json=data,
-                                                headers={'Content-Type': 'application/json'}
-                                            )
-
-                                            if response.status_code == 200:
-                                                logging.info(f"群@消息已成功发送到webhook: {webhook_url}")
-                                            else:
-                                                logging.error(f"发送群@消息到webhook失败，状态码: {response.status_code}")
-                                                logging.error(f"响应内容: {response.text}")
-                                        except Exception as e:
-                                            logging.error(f"发送到webhook {webhook_url} 失败: {str(e)}")
-
-                                except Exception as e:
-                                    logging.error(f"处理群@消息失败: {str(e)}")
-                                    logging.error(traceback.format_exc())
-                            else:
-                                # 群消息未被@，只记录日志
-                                logging.info(
-                                    f"收到来自群 {who} 的消息，发送者: {sender}, 内容: {content}，未被@，忽略处理")
-                        else:
-                            # 私聊消息
-                            logging.info(f"收到来自 {who} 的私聊消息: {content}")
-                            try:
-                                data = {
-                                    "target_user": who,
-                                    "message": content,
-                                    "timestamp": timestamp,
-                                    "is_group": False,
-                                    "chat_name": who
-                                }
-
-                                # 发送到所有配置的webhook地址
-                                for webhook_url in self.external_webhook_urls:
-                                    try:
-                                        response = requests.post(
-                                            webhook_url,
-                                            json=data,
-                                            headers={'Content-Type': 'application/json'}
-                                        )
-
-                                        if response.status_code == 200:
-                                            logging.info(f"私聊消息已成功发送到webhook: {webhook_url}")
-                                        else:
-                                            logging.error(f"发送到webhook失败，状态码: {response.status_code}")
-                                            logging.error(f"响应内容: {response.text}")
-                                    except Exception as e:
-                                        logging.error(f"发送到webhook {webhook_url} 失败: {str(e)}")
-
-                            except Exception as e:
-                                logging.error(f"发送到webhook失败: {str(e)}")
-                                logging.error(traceback.format_exc())
-
-                time.sleep(self.message_wait_time)
-
+                time.sleep(1)
             except Exception as e:
-                logging.error(f"处理消息时出错: {str(e)}")
+                logging.error(f"监听循环出错: {str(e)}")
                 logging.error(traceback.format_exc())
                 time.sleep(5)
+
+        # 停止监听
+        try:
+            wx.StopListening()
+            logging.info("监听已停止")
+        except Exception as e:
+            logging.error(f"停止监听失败: {str(e)}")
 
     def update_webhook_url(self):
         """更新当前webhook URL显示"""
