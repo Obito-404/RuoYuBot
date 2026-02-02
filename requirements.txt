@@ -5,6 +5,7 @@ flask>=2.3.0
 pywin32>=306
 chardet>=5.0.0
 werkzeug>=2.3.0
+schedule>=1.2.0
 
 # 打包依赖
 pyinstaller>=6.3.0

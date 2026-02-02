@@ -8,11 +8,11 @@ import threading
 import win32gui
 import win32con
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, messagebox
 import socket
 import queue
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import configparser
 import os
@@ -20,6 +20,8 @@ from pathlib import Path
 import sys
 from werkzeug.serving import make_server
 import chardet
+import schedule
+import uuid
 
 try:
     from icon import icon_img  # Import the base64 encoded icon
@@ -138,6 +140,240 @@ class Config:
         with open(self.config_path, 'w', encoding='utf-8') as f:
             self.config.write(f)
 
+    def get_scheduled_tasks_path(self) -> Path:
+        """获取定时任务配置文件路径"""
+        return Path("scheduled_tasks.json")
+
+    def load_scheduled_tasks(self) -> dict:
+        """从JSON文件加载定时任务"""
+        tasks_path = self.get_scheduled_tasks_path()
+        if not tasks_path.exists():
+            return {"tasks": []}
+        try:
+            with open(tasks_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"加载定时任务失败: {str(e)}")
+            return {"tasks": []}
+
+    def save_scheduled_tasks(self, tasks_data: dict):
+        """保存定时任务到JSON文件"""
+        tasks_path = self.get_scheduled_tasks_path()
+        try:
+            with open(tasks_path, 'w', encoding='utf-8') as f:
+                json.dump(tasks_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.error(f"保存定时任务失败: {str(e)}")
+
+
+# 定时任务管理器
+class ScheduledTaskManager:
+    def __init__(self, config: Config, message_queue: queue.Queue):
+        self.config = config
+        self.message_queue = message_queue
+        self.tasks = []
+        self.is_running = False
+        self.load_tasks()
+
+    def load_tasks(self):
+        """从配置文件加载任务"""
+        try:
+            tasks_data = self.config.load_scheduled_tasks()
+            self.tasks = tasks_data.get("tasks", [])
+            logging.info(f"已加载 {len(self.tasks)} 个定时任务")
+        except Exception as e:
+            logging.error(f"加载定时任务失败: {str(e)}")
+            self.tasks = []
+
+    def save_tasks(self):
+        """保存任务到配置文件"""
+        try:
+            tasks_data = {"tasks": self.tasks}
+            self.config.save_scheduled_tasks(tasks_data)
+            logging.info("定时任务已保存")
+        except Exception as e:
+            logging.error(f"保存定时任务失败: {str(e)}")
+
+    def add_task(self, task_data: dict) -> str:
+        """添加新任务"""
+        task_id = str(uuid.uuid4())
+        task = {
+            "id": task_id,
+            "name": task_data.get("name", ""),
+            "enabled": True,
+            "schedule_type": task_data.get("schedule_type", "daily"),
+            "time": task_data.get("time", "09:00"),
+            "weekday": task_data.get("weekday", 0),
+            "recipient": task_data.get("recipient", ""),
+            "message": task_data.get("message", ""),
+            "is_group": task_data.get("is_group", False),
+            "at_list": task_data.get("at_list", None),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_run": None,
+            "next_run": None
+        }
+        task["next_run"] = self.calculate_next_run(task)
+        self.tasks.append(task)
+        self.save_tasks()
+        logging.info(f"已添加定时任务: {task['name']}")
+        return task_id
+
+    def update_task(self, task_id: str, task_data: dict):
+        """更新任务"""
+        for i, task in enumerate(self.tasks):
+            if task["id"] == task_id:
+                task["name"] = task_data.get("name", task["name"])
+                task["schedule_type"] = task_data.get("schedule_type", task["schedule_type"])
+                task["time"] = task_data.get("time", task["time"])
+                task["weekday"] = task_data.get("weekday", task["weekday"])
+                task["recipient"] = task_data.get("recipient", task["recipient"])
+                task["message"] = task_data.get("message", task["message"])
+                task["is_group"] = task_data.get("is_group", task["is_group"])
+                task["at_list"] = task_data.get("at_list", task["at_list"])
+                task["next_run"] = self.calculate_next_run(task)
+                self.save_tasks()
+                logging.info(f"已更新定时任务: {task['name']}")
+                return True
+        return False
+
+    def delete_task(self, task_id: str):
+        """删除任务"""
+        for i, task in enumerate(self.tasks):
+            if task["id"] == task_id:
+                task_name = task["name"]
+                self.tasks.pop(i)
+                self.save_tasks()
+                logging.info(f"已删除定时任务: {task_name}")
+                return True
+        return False
+
+    def toggle_task_enabled(self, task_id: str):
+        """切换任务启用状态"""
+        for task in self.tasks:
+            if task["id"] == task_id:
+                task["enabled"] = not task["enabled"]
+                if task["enabled"]:
+                    task["next_run"] = self.calculate_next_run(task)
+                self.save_tasks()
+                status = "启用" if task["enabled"] else "禁用"
+                logging.info(f"已{status}定时任务: {task['name']}")
+                return True
+        return False
+
+    def get_all_tasks(self) -> List[dict]:
+        """获取所有任务"""
+        return self.tasks
+
+    def calculate_next_run(self, task: dict) -> str:
+        """计算下次运行时间"""
+        try:
+            schedule_type = task["schedule_type"]
+            time_str = task["time"]
+            hour, minute = map(int, time_str.split(":"))
+
+            now = datetime.now()
+            today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+            if schedule_type == "daily":
+                # 每天执行
+                if today <= now:
+                    next_run = today + timedelta(days=1)
+                else:
+                    next_run = today
+            elif schedule_type == "weekly":
+                # 每周执行（从今天开始算7天后）
+                if today <= now:
+                    next_run = today + timedelta(weeks=1)
+                else:
+                    next_run = today
+            elif schedule_type == "weekday":
+                # 特定星期几执行
+                target_weekday = task["weekday"]
+                current_weekday = now.weekday()
+                days_ahead = target_weekday - current_weekday
+
+                if days_ahead < 0 or (days_ahead == 0 and today <= now):
+                    days_ahead += 7
+
+                next_run = today + timedelta(days=days_ahead)
+            else:
+                next_run = today
+
+            return next_run.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception as e:
+            logging.error(f"计算下次运行时间失败: {str(e)}")
+            return None
+
+    def execute_task(self, task: dict):
+        """执行任务"""
+        try:
+            logging.info(f"执行定时任务: {task['name']}")
+
+            # 将消息添加到队列
+            self.message_queue.put({
+                'who': task['recipient'],
+                'content': task['message'],
+                'is_group': task['is_group'],
+                'at_list': task['at_list'],
+                'chat_name': task['recipient']
+            })
+
+            # 更新最后运行时间
+            task['last_run'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            task['next_run'] = self.calculate_next_run(task)
+            self.save_tasks()
+
+            logging.info(f"定时任务已加入发送队列: {task['name']}")
+        except Exception as e:
+            logging.error(f"执行定时任务失败: {str(e)}")
+            logging.error(traceback.format_exc())
+
+    def schedule_task(self, task: dict):
+        """使用schedule库注册任务"""
+        try:
+            schedule_type = task["schedule_type"]
+            time_str = task["time"]
+
+            if schedule_type == "daily":
+                schedule.every().day.at(time_str).do(self.execute_task, task=task)
+            elif schedule_type == "weekly":
+                schedule.every().week.at(time_str).do(self.execute_task, task=task)
+            elif schedule_type == "weekday":
+                weekday = task["weekday"]
+                weekday_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+                if 0 <= weekday < 7:
+                    getattr(schedule.every(), weekday_names[weekday]).at(time_str).do(self.execute_task, task=task)
+
+            logging.info(f"已调度任务: {task['name']} - {schedule_type} at {time_str}")
+        except Exception as e:
+            logging.error(f"调度任务失败: {str(e)}")
+            logging.error(traceback.format_exc())
+
+    def reschedule_all_tasks(self):
+        """重新调度所有任务"""
+        schedule.clear()
+        for task in self.tasks:
+            if task["enabled"]:
+                self.schedule_task(task)
+        logging.info(f"已重新调度 {len([t for t in self.tasks if t['enabled']])} 个启用的任务")
+
+    def run_scheduler(self):
+        """调度器主循环（在独立线程中运行）"""
+        self.is_running = True
+        self.reschedule_all_tasks()
+        logging.info("定时任务调度器已启动")
+
+        while self.is_running:
+            try:
+                schedule.run_pending()
+                time.sleep(1)
+            except Exception as e:
+                logging.error(f"调度器运行出错: {str(e)}")
+                logging.error(traceback.format_exc())
+                time.sleep(5)
+
+        logging.info("定时任务调度器已停止")
+
 
 # 初始化配置
 config = Config()
@@ -227,7 +463,7 @@ class WeChatGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("若愚")
-        self.root.geometry("900x1000")
+        self.root.geometry("900x750")
 
         # 设置主题颜色
         self.bg_color = "#f5f5f5"
@@ -279,11 +515,18 @@ class WeChatGUI:
         # 昵称相关
         self.nickname_var = tk.StringVar(value="")
 
+        # 初始化定时任务管理器
+        self.task_manager = ScheduledTaskManager(config, self.message_queue)
+        self.scheduler_thread = None
+
         # 创建GUI元素
         self.create_widgets()
 
         # 启动日志更新
         self.update_logs()
+
+        # 刷新定时任务列表
+        self.refresh_scheduled_tasks()
 
         # 显示GUI窗口
         self.root.deiconify()
@@ -291,11 +534,6 @@ class WeChatGUI:
         self.root.focus_force()
 
     def create_widgets(self):
-        # 创建主框架
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        main_frame.configure(style='Main.TFrame')
-
         # 创建样式
         style = ttk.Style()
         style.configure('Main.TFrame', background=self.bg_color)
@@ -306,13 +544,45 @@ class WeChatGUI:
         style.configure('Log.TFrame', background='white', relief='solid', borderwidth=1)
         style.configure('URL.TLabel', font=self.label_font, foreground=self.accent_color, background=self.bg_color)
 
+        # 创建主框架
+        main_container = ttk.Frame(self.root, padding="10")
+        main_container.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
         # 标题
-        title_label = ttk.Label(main_frame, text="若愚Bot", style='Title.TLabel')
-        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        title_label = ttk.Label(main_container, text="若愚Bot", style='Title.TLabel')
+        title_label.grid(row=0, column=0, pady=(0, 10))
+
+        # 创建标签页
+        self.notebook = ttk.Notebook(main_container)
+        self.notebook.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Tab 1: 主控制
+        main_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(main_tab, text="主控制")
+
+        # Tab 2: 定时任务
+        scheduled_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(scheduled_tab, text="定时任务")
+
+        # 配置主容器网格权重
+        main_container.columnconfigure(0, weight=1)
+        main_container.rowconfigure(1, weight=1)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        # 创建主控制标签页内容
+        self.create_main_tab(main_tab)
+
+        # 创建定时任务标签页内容
+        self.create_scheduled_tab(scheduled_tab)
+
+    def create_main_tab(self, parent):
+        """创建主控制标签页"""
+        row = 0
 
         # Webhook URL输入区域
-        webhook_frame = ttk.Frame(main_frame, style='Main.TFrame')
-        webhook_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+        webhook_frame = ttk.Frame(parent, style='Main.TFrame')
+        webhook_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
 
         ttk.Label(webhook_frame, text="回调地址 (每行一个):", style='Label.TLabel').grid(row=0, column=0, sticky=tk.W)
         self.webhook_text = scrolledtext.ScrolledText(webhook_frame, height=4, width=80,
@@ -324,10 +594,11 @@ class WeChatGUI:
         update_webhook_button = ttk.Button(webhook_frame, text="更新", command=self.update_webhook_urls,
                                          style='Button.TButton', width=8)
         update_webhook_button.grid(row=2, column=0, sticky=tk.E, pady=(5, 0))
+        row += 1
 
         # API Token输入区域
-        api_token_frame = ttk.Frame(main_frame, style='Main.TFrame')
-        api_token_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+        api_token_frame = ttk.Frame(parent, style='Main.TFrame')
+        api_token_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
 
         ttk.Label(api_token_frame, text="API Token:", style='Label.TLabel').grid(row=0, column=0, sticky=tk.W)
         self.api_token_var = tk.StringVar(value=config.get_api_token())
@@ -337,10 +608,11 @@ class WeChatGUI:
         update_token_button = ttk.Button(api_token_frame, text="更新", command=self.update_api_token,
                                        style='Button.TButton', width=10)
         update_token_button.grid(row=0, column=2, padx=(10, 0))
+        row += 1
 
         # 本地Webhook设置区域
-        local_webhook_frame = ttk.Frame(main_frame, style='Main.TFrame')
-        local_webhook_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+        local_webhook_frame = ttk.Frame(parent, style='Main.TFrame')
+        local_webhook_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
 
         ttk.Label(local_webhook_frame, text="本地端口:", style='Label.TLabel').grid(row=0, column=0, sticky=tk.W)
         port_entry = ttk.Entry(local_webhook_frame, textvariable=self.local_port, width=10)
@@ -349,17 +621,19 @@ class WeChatGUI:
         self.update_port_button = ttk.Button(local_webhook_frame, text="更新", command=self.update_webhook_url,
                                    style='Button.TButton', width=8)
         self.update_port_button.grid(row=0, column=2, padx=(10, 0))
+        row += 1
 
         # 当前Webhook URL显示
-        self.current_webhook_label = ttk.Label(main_frame, textvariable=self.current_webhook_url, style='URL.TLabel')
-        self.current_webhook_label.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+        self.current_webhook_label = ttk.Label(parent, textvariable=self.current_webhook_url, style='URL.TLabel')
+        self.current_webhook_label.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+        row += 1
 
         # 初始化当前webhook URL
         self.update_webhook_url()
 
         # 监听对象输入区域
-        listen_frame = ttk.Frame(main_frame, style='Main.TFrame')
-        listen_frame.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+        listen_frame = ttk.Frame(parent, style='Main.TFrame')
+        listen_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
 
         ttk.Label(listen_frame, text="监听对象 (每行一个，名称严格区分大小写):", style='Label.TLabel').grid(row=0,
                                                                                                            column=0,
@@ -369,10 +643,11 @@ class WeChatGUI:
                                                      relief='solid', borderwidth=1)
         self.listen_text.grid(row=1, column=0, columnspan=2, pady=(5, 0), sticky=(tk.W, tk.E))
         self.listen_text.insert(tk.END, "\n".join(config.get_listen_list()))
+        row += 1
 
         # 控制按钮
-        button_frame = ttk.Frame(main_frame, style='Main.TFrame')
-        button_frame.grid(row=7, column=0, columnspan=3, pady=15)
+        button_frame = ttk.Frame(parent, style='Main.TFrame')
+        button_frame.grid(row=row, column=0, columnspan=3, pady=15)
 
         self.start_button = ttk.Button(button_frame, text="开始", command=self.start_service,
                                        style='Button.TButton', width=10)
@@ -381,29 +656,95 @@ class WeChatGUI:
         self.stop_button = ttk.Button(button_frame, text="停止", command=self.stop_service,
                                       style='Button.TButton', width=10, state=tk.DISABLED)
         self.stop_button.grid(row=0, column=1, padx=5)
+        row += 1
 
         # 日志显示区域
-        log_frame = ttk.LabelFrame(main_frame, text="日志", style='Log.TFrame', padding="10")
-        log_frame.grid(row=8, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 15))
+        log_frame = ttk.LabelFrame(parent, text="日志", style='Log.TFrame', padding="10")
+        log_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 15))
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=25, width=80,
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, width=80,
                                                   font=self.log_font, bg='white',
                                                   relief='flat')
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        row += 1
 
         # 状态标签
-        self.status_label = ttk.Label(main_frame, text="状态: 已停止", style='Label.TLabel')
-        self.status_label.grid(row=9, column=0, columnspan=3, sticky=tk.W)
+        self.status_label = ttk.Label(parent, text="状态: 已停止", style='Label.TLabel')
+        self.status_label.grid(row=row, column=0, columnspan=3, sticky=tk.W)
 
         # 配置网格权重
-        main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(8, weight=1)
+        parent.columnconfigure(1, weight=1)
+        parent.rowconfigure(row-1, weight=1)  # 日志区域可扩展
         listen_frame.columnconfigure(1, weight=1)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
+    def create_scheduled_tab(self, parent):
+        """创建定时任务标签页"""
+        row = 0
+
+        # 说明文本
+        info_label = ttk.Label(parent, text="在此管理定时发送的消息任务", style='Label.TLabel')
+        info_label.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        row += 1
+
+        # 定时任务列表
+        list_frame = ttk.LabelFrame(parent, text="任务列表", style='Log.TFrame', padding="10")
+        list_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 15))
+
+        columns = ("id", "name", "type", "time", "recipient", "status", "next_run")
+        self.scheduled_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+
+        # 设置列标题
+        self.scheduled_tree.heading("id", text="ID")
+        self.scheduled_tree.heading("name", text="任务名称")
+        self.scheduled_tree.heading("type", text="类型")
+        self.scheduled_tree.heading("time", text="时间")
+        self.scheduled_tree.heading("recipient", text="接收者")
+        self.scheduled_tree.heading("status", text="状态")
+        self.scheduled_tree.heading("next_run", text="下次运行")
+
+        # 设置列宽
+        self.scheduled_tree.column("id", width=0, stretch=False)  # 隐藏ID列
+        self.scheduled_tree.column("name", width=150)
+        self.scheduled_tree.column("type", width=100)
+        self.scheduled_tree.column("time", width=80)
+        self.scheduled_tree.column("recipient", width=150)
+        self.scheduled_tree.column("status", width=80)
+        self.scheduled_tree.column("next_run", width=180)
+
+        # 添加滚动条
+        scheduled_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.scheduled_tree.yview)
+        self.scheduled_tree.configure(yscrollcommand=scheduled_scrollbar.set)
+
+        self.scheduled_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scheduled_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        row += 1
+
+        # 定时任务按钮
+        button_frame = ttk.Frame(parent, style='Main.TFrame')
+        button_frame.grid(row=row, column=0, columnspan=2, pady=(10, 0))
+
+        ttk.Button(button_frame, text="添加任务", command=self.open_add_task_dialog,
+                  style='Button.TButton', width=12).grid(row=0, column=0, padx=5)
+        ttk.Button(button_frame, text="编辑任务", command=self.open_edit_task_dialog,
+                  style='Button.TButton', width=12).grid(row=0, column=1, padx=5)
+        ttk.Button(button_frame, text="删除任务", command=self.delete_selected_task,
+                  style='Button.TButton', width=12).grid(row=0, column=2, padx=5)
+        ttk.Button(button_frame, text="启用/禁用", command=self.toggle_task_enabled,
+                  style='Button.TButton', width=12).grid(row=0, column=3, padx=5)
+        ttk.Button(button_frame, text="刷新列表", command=self.refresh_scheduled_tasks,
+                  style='Button.TButton', width=12).grid(row=0, column=4, padx=5)
+
+        # 配置网格权重
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)  # 任务列表可扩展
+
         # 设置窗口最小大小
-        self.root.minsize(900, 800)
+        self.root.minsize(900, 700)
 
     def get_local_ip(self):
         try:
@@ -458,6 +799,11 @@ class WeChatGUI:
             self.listener_thread.daemon = True
             self.listener_thread.start()
 
+            # 启动定时任务调度器线程
+            self.scheduler_thread = threading.Thread(target=self.task_manager.run_scheduler)
+            self.scheduler_thread.daemon = True
+            self.scheduler_thread.start()
+
             logging.info("服务启动成功")
 
     def stop_service(self):
@@ -466,6 +812,10 @@ class WeChatGUI:
             self.start_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
             self.status_label.config(text="状态: 已停止")
+
+            # 停止定时任务调度器
+            if self.task_manager:
+                self.task_manager.is_running = False
 
             # 关闭Flask服务器
             try:
@@ -619,8 +969,27 @@ class WeChatGUI:
         try:
             msgtype = msg.type
             content = msg.content
-            sender = msg.sender if hasattr(msg, 'sender') else chat.name
-            who = chat.name
+
+            # 获取聊天名称（兼容不同版本的wxauto）
+            if hasattr(chat, 'name'):
+                who = chat.name
+            elif hasattr(chat, 'nickname'):
+                who = chat.nickname
+            elif hasattr(chat, 'title'):
+                who = chat.title
+            else:
+                # 如果都没有，尝试从消息对象获取
+                who = getattr(msg, 'chat_name', 'Unknown')
+                # 记录调试信息
+                logging.debug(f"Chat对象属性: {dir(chat)}")
+                logging.debug(f"Message对象属性: {dir(msg)}")
+
+            # 获取发送者（兼容不同版本）
+            if hasattr(msg, 'sender'):
+                sender = msg.sender
+            else:
+                sender = who
+
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
             # 检查是否是重复消息
@@ -836,6 +1205,371 @@ class WeChatGUI:
             logging.info("回调地址已更新")
         except Exception as e:
             logging.error(f"更新回调地址失败: {str(e)}")
+
+    def refresh_scheduled_tasks(self):
+        """刷新定时任务列表"""
+        try:
+            # 清空现有列表
+            for item in self.scheduled_tree.get_children():
+                self.scheduled_tree.delete(item)
+
+            # 重新加载任务
+            self.task_manager.load_tasks()
+            tasks = self.task_manager.get_all_tasks()
+
+            # 添加任务到列表
+            for task in tasks:
+                schedule_type_map = {
+                    "daily": "每天",
+                    "weekly": "每周",
+                    "weekday": f"周{['一', '二', '三', '四', '五', '六', '日'][task['weekday']]}"
+                }
+                schedule_type = schedule_type_map.get(task["schedule_type"], task["schedule_type"])
+                status = "启用" if task["enabled"] else "禁用"
+                next_run = task.get("next_run", "未设置")
+
+                self.scheduled_tree.insert("", tk.END, values=(
+                    task["id"],
+                    task["name"],
+                    schedule_type,
+                    task["time"],
+                    task["recipient"],
+                    status,
+                    next_run
+                ))
+
+            logging.info(f"已刷新定时任务列表，共 {len(tasks)} 个任务")
+        except Exception as e:
+            logging.error(f"刷新定时任务列表失败: {str(e)}")
+            logging.error(traceback.format_exc())
+
+    def open_add_task_dialog(self):
+        """打开添加任务对话框"""
+        try:
+            dialog = TaskDialog(self.root, self, None)
+        except Exception as e:
+            logging.error(f"打开添加任务对话框失败: {str(e)}")
+            logging.error(traceback.format_exc())
+
+    def open_edit_task_dialog(self):
+        """打开编辑任务对话框"""
+        try:
+            selected = self.scheduled_tree.selection()
+            if not selected:
+                messagebox.showwarning("提示", "请先选择要编辑的任务")
+                return
+
+            task_id = self.scheduled_tree.item(selected[0])["values"][0]
+            tasks = self.task_manager.get_all_tasks()
+            task = next((t for t in tasks if t["id"] == task_id), None)
+
+            if task:
+                dialog = TaskDialog(self.root, self, task)
+            else:
+                messagebox.showerror("错误", "未找到选中的任务")
+        except Exception as e:
+            logging.error(f"打开编辑任务对话框失败: {str(e)}")
+            logging.error(traceback.format_exc())
+
+    def delete_selected_task(self):
+        """删除选中的任务"""
+        try:
+            selected = self.scheduled_tree.selection()
+            if not selected:
+                messagebox.showwarning("提示", "请先选择要删除的任务")
+                return
+
+            if messagebox.askyesno("确认", "确定要删除选中的任务吗？"):
+                task_id = self.scheduled_tree.item(selected[0])["values"][0]
+                if self.task_manager.delete_task(task_id):
+                    self.refresh_scheduled_tasks()
+                    # 重新调度所有任务
+                    if self.is_running:
+                        self.task_manager.reschedule_all_tasks()
+                    messagebox.showinfo("成功", "任务已删除")
+                else:
+                    messagebox.showerror("错误", "删除任务失败")
+        except Exception as e:
+            logging.error(f"删除任务失败: {str(e)}")
+            logging.error(traceback.format_exc())
+            messagebox.showerror("错误", f"删除任务失败: {str(e)}")
+
+    def toggle_task_enabled(self):
+        """切换任务启用状态"""
+        try:
+            selected = self.scheduled_tree.selection()
+            if not selected:
+                messagebox.showwarning("提示", "请先选择要启用/禁用的任务")
+                return
+
+            task_id = self.scheduled_tree.item(selected[0])["values"][0]
+            if self.task_manager.toggle_task_enabled(task_id):
+                self.refresh_scheduled_tasks()
+                # 重新调度所有任务
+                if self.is_running:
+                    self.task_manager.reschedule_all_tasks()
+                messagebox.showinfo("成功", "任务状态已更新")
+            else:
+                messagebox.showerror("错误", "更新任务状态失败")
+        except Exception as e:
+            logging.error(f"切换任务状态失败: {str(e)}")
+            logging.error(traceback.format_exc())
+            messagebox.showerror("错误", f"切换任务状态失败: {str(e)}")
+
+
+# 任务对话框
+class TaskDialog:
+    def __init__(self, parent, gui: WeChatGUI, task: Optional[dict] = None):
+        self.parent = parent
+        self.gui = gui
+        self.task = task
+        self.is_edit = task is not None
+
+        # 创建对话框窗口
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("编辑任务" if self.is_edit else "添加任务")
+        self.dialog.geometry("600x700")
+        self.dialog.resizable(False, False)
+
+        # 设置为模态窗口
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.create_widgets()
+
+        # 如果是编辑模式，填充现有数据
+        if self.is_edit:
+            self.load_task_data()
+
+        # 居中显示
+        self.center_window()
+
+    def center_window(self):
+        """将窗口居中显示"""
+        self.dialog.update_idletasks()
+        width = self.dialog.winfo_width()
+        height = self.dialog.winfo_height()
+        x = (self.dialog.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (height // 2)
+        self.dialog.geometry(f'{width}x{height}+{x}+{y}')
+
+    def create_widgets(self):
+        """创建对话框组件"""
+        main_frame = ttk.Frame(self.dialog, padding="20")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        row = 0
+
+        # 任务名称
+        ttk.Label(main_frame, text="任务名称:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.name_var = tk.StringVar()
+        ttk.Entry(main_frame, textvariable=self.name_var, width=40).grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        row += 1
+
+        # 调度类型
+        ttk.Label(main_frame, text="调度类型:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.schedule_type_var = tk.StringVar(value="daily")
+        schedule_type_combo = ttk.Combobox(main_frame, textvariable=self.schedule_type_var,
+                                          values=["daily", "weekly", "weekday"],
+                                          state="readonly", width=37)
+        schedule_type_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        schedule_type_combo.bind("<<ComboboxSelected>>", self.on_schedule_type_changed)
+        row += 1
+
+        # 时间设置
+        ttk.Label(main_frame, text="时间:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        time_frame = ttk.Frame(main_frame)
+        time_frame.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+
+        self.hour_var = tk.StringVar(value="09")
+        self.minute_var = tk.StringVar(value="00")
+
+        ttk.Label(time_frame, text="小时:").grid(row=0, column=0, padx=(0, 5))
+        hour_spinbox = ttk.Spinbox(time_frame, from_=0, to=23, textvariable=self.hour_var,
+                                   width=5, format="%02.0f")
+        hour_spinbox.grid(row=0, column=1, padx=(0, 10))
+
+        ttk.Label(time_frame, text="分钟:").grid(row=0, column=2, padx=(0, 5))
+        minute_spinbox = ttk.Spinbox(time_frame, from_=0, to=59, textvariable=self.minute_var,
+                                     width=5, format="%02.0f")
+        minute_spinbox.grid(row=0, column=3)
+        row += 1
+
+        # 星期选择（仅weekday类型显��）
+        ttk.Label(main_frame, text="星期:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.weekday_var = tk.StringVar(value="0")
+        self.weekday_combo = ttk.Combobox(main_frame, textvariable=self.weekday_var,
+                                         values=["0", "1", "2", "3", "4", "5", "6"],
+                                         state="readonly", width=37)
+        self.weekday_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        self.weekday_label = ttk.Label(main_frame, text="(0=周一, 1=周二, ..., 6=周日)")
+        self.weekday_label.grid(row=row+1, column=1, sticky=tk.W)
+        row += 2
+
+        # 接收者
+        ttk.Label(main_frame, text="接收者:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.recipient_var = tk.StringVar()
+        # 从监听列表获取可选接收者
+        listen_list = self.gui.get_listen_list()
+        recipient_combo = ttk.Combobox(main_frame, textvariable=self.recipient_var,
+                                      values=listen_list, width=37)
+        recipient_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        row += 1
+
+        # 是否群聊
+        self.is_group_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(main_frame, text="群聊消息", variable=self.is_group_var,
+                       command=self.on_is_group_changed).grid(row=row, column=1, sticky=tk.W, pady=5)
+        row += 1
+
+        # @列表（仅群聊显示）
+        ttk.Label(main_frame, text="@列表:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.at_list_var = tk.StringVar()
+        self.at_list_entry = ttk.Entry(main_frame, textvariable=self.at_list_var, width=40)
+        self.at_list_entry.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        self.at_list_label = ttk.Label(main_frame, text="(多个用逗号分隔，all表示@所有人)")
+        self.at_list_label.grid(row=row+1, column=1, sticky=tk.W)
+        row += 2
+
+        # 消息内容
+        ttk.Label(main_frame, text="消息内容:").grid(row=row, column=0, sticky=(tk.W, tk.N), pady=5)
+        self.message_text = scrolledtext.ScrolledText(main_frame, height=10, width=40)
+        self.message_text.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        row += 1
+
+        # 按钮
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=row, column=0, columnspan=2, pady=20)
+
+        ttk.Button(button_frame, text="保存", command=self.save_task, width=10).grid(row=0, column=0, padx=5)
+        ttk.Button(button_frame, text="取消", command=self.dialog.destroy, width=10).grid(row=0, column=1, padx=5)
+
+        # 配置网格权重
+        main_frame.columnconfigure(1, weight=1)
+        self.dialog.columnconfigure(0, weight=1)
+        self.dialog.rowconfigure(0, weight=1)
+
+        # 初始化显示状态
+        self.on_schedule_type_changed()
+        self.on_is_group_changed()
+
+    def on_schedule_type_changed(self, event=None):
+        """调度类型改变时的处理"""
+        schedule_type = self.schedule_type_var.get()
+        if schedule_type == "weekday":
+            self.weekday_combo.config(state="readonly")
+            self.weekday_label.config(foreground="black")
+        else:
+            self.weekday_combo.config(state="disabled")
+            self.weekday_label.config(foreground="gray")
+
+    def on_is_group_changed(self):
+        """群聊选项改变时的处理"""
+        is_group = self.is_group_var.get()
+        if is_group:
+            self.at_list_entry.config(state="normal")
+            self.at_list_label.config(foreground="black")
+        else:
+            self.at_list_entry.config(state="disabled")
+            self.at_list_label.config(foreground="gray")
+
+    def load_task_data(self):
+        """加载任务数据到表单"""
+        if not self.task:
+            return
+
+        self.name_var.set(self.task.get("name", ""))
+        self.schedule_type_var.set(self.task.get("schedule_type", "daily"))
+
+        time_str = self.task.get("time", "09:00")
+        hour, minute = time_str.split(":")
+        self.hour_var.set(hour)
+        self.minute_var.set(minute)
+
+        self.weekday_var.set(str(self.task.get("weekday", 0)))
+        self.recipient_var.set(self.task.get("recipient", ""))
+        self.is_group_var.set(self.task.get("is_group", False))
+
+        at_list = self.task.get("at_list")
+        if at_list:
+            if isinstance(at_list, list):
+                self.at_list_var.set(",".join(at_list))
+            else:
+                self.at_list_var.set(str(at_list))
+
+        self.message_text.delete("1.0", tk.END)
+        self.message_text.insert("1.0", self.task.get("message", ""))
+
+        # 更新显示状态
+        self.on_schedule_type_changed()
+        self.on_is_group_changed()
+
+    def save_task(self):
+        """保存任务"""
+        try:
+            # 验证输入
+            name = self.name_var.get().strip()
+            if not name:
+                messagebox.showerror("错误", "请输入任务名称")
+                return
+
+            recipient = self.recipient_var.get().strip()
+            if not recipient:
+                messagebox.showerror("错误", "请选择接收者")
+                return
+
+            message = self.message_text.get("1.0", tk.END).strip()
+            if not message:
+                messagebox.showerror("错误", "请输入消息内容")
+                return
+
+            # 构建任务数据
+            hour = int(self.hour_var.get())
+            minute = int(self.minute_var.get())
+            time_str = f"{hour:02d}:{minute:02d}"
+
+            at_list = None
+            if self.is_group_var.get():
+                at_list_str = self.at_list_var.get().strip()
+                if at_list_str:
+                    if at_list_str.lower() == "all":
+                        at_list = ["all"]
+                    else:
+                        at_list = [x.strip() for x in at_list_str.split(",") if x.strip()]
+
+            task_data = {
+                "name": name,
+                "schedule_type": self.schedule_type_var.get(),
+                "time": time_str,
+                "weekday": int(self.weekday_var.get()),
+                "recipient": recipient,
+                "message": message,
+                "is_group": self.is_group_var.get(),
+                "at_list": at_list
+            }
+
+            # 保存任务
+            if self.is_edit:
+                self.gui.task_manager.update_task(self.task["id"], task_data)
+                messagebox.showinfo("成功", "任务已更新")
+            else:
+                self.gui.task_manager.add_task(task_data)
+                messagebox.showinfo("成功", "任务已添加")
+
+            # 刷新任务列表
+            self.gui.refresh_scheduled_tasks()
+
+            # 如果服务正在运行，重新调度所有任务
+            if self.gui.is_running:
+                self.gui.task_manager.reschedule_all_tasks()
+
+            # 关闭对话框
+            self.dialog.destroy()
+
+        except Exception as e:
+            logging.error(f"保存任务失败: {str(e)}")
+            logging.error(traceback.format_exc())
+            messagebox.showerror("错误", f"保存任务失败: {str(e)}")
 
 
 # 本地webhook路由
