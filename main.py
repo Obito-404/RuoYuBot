@@ -1108,8 +1108,27 @@ class WeChatGUI:
             logging.error(traceback.format_exc())
 
     def message_listener(self):
-        # 获取监听对象列表
+        # 获取主控制页面的监听对象列表
         listen_list = self.get_listen_list()
+
+        # 获取定时任务的所有接收者
+        scheduled_recipients = []
+        if self.task_manager:
+            tasks = self.task_manager.get_all_tasks()
+            for task in tasks:
+                if task.get('enabled', False):  # 只添加启用的任务的接收者
+                    recipient = task.get('recipient', '')
+                    if recipient and recipient not in scheduled_recipients:
+                        scheduled_recipients.append(recipient)
+
+        # 合并并去重监听列表
+        combined_list = list(set(listen_list + scheduled_recipients))
+
+        if scheduled_recipients:
+            logging.info(f"从定时任务中添加了 {len(scheduled_recipients)} 个接收者到监听列表")
+            logging.info(f"定时任务接收者: {', '.join(scheduled_recipients)}")
+
+        logging.info(f"最终监听列表（共 {len(combined_list)} 个）: {', '.join(combined_list)}")
 
         # 启动消息队列处理线程
         queue_thread = threading.Thread(target=self.process_message_queue)
@@ -1121,7 +1140,7 @@ class WeChatGUI:
         logging.info(f"我的昵称: {my_nickname}")
 
         # 添加监听对象（使用新的API）
-        for who in listen_list:
+        for who in combined_list:
             try:
                 wx.AddListenChat(nickname=who, callback=self.handle_message_callback)
                 logging.info(f"已添加监听: {who}")
