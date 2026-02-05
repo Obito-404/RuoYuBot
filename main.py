@@ -212,6 +212,11 @@ class ScheduledTaskManager:
             "last_run": None,
             "next_run": None
         }
+
+        # 如果是单次任务，添加日期字段
+        if task["schedule_type"] == "once":
+            task["date"] = task_data.get("date", datetime.now().strftime("%Y-%m-%d"))
+
         task["next_run"] = self.calculate_next_run(task)
         self.tasks.append(task)
         self.save_tasks()
@@ -230,6 +235,11 @@ class ScheduledTaskManager:
                 task["message"] = task_data.get("message", task["message"])
                 task["is_group"] = task_data.get("is_group", task["is_group"])
                 task["at_list"] = task_data.get("at_list", task["at_list"])
+
+                # 如果是单次任务，更新日期字段
+                if task["schedule_type"] == "once":
+                    task["date"] = task_data.get("date", task.get("date", datetime.now().strftime("%Y-%m-%d")))
+
                 task["next_run"] = self.calculate_next_run(task)
                 self.save_tasks()
                 logging.info(f"已更新定时任务: {task['name']}")
@@ -296,6 +306,19 @@ class ScheduledTaskManager:
                     days_ahead += 7
 
                 next_run = today + timedelta(days=days_ahead)
+            elif schedule_type == "once":
+                # 单次执行
+                date_str = task.get("date", "")
+                if not date_str:
+                    logging.error("单次任务缺少日期信息")
+                    return None
+
+                year, month, day = map(int, date_str.split("-"))
+                next_run = datetime(year, month, day, hour, minute, 0)
+
+                # 如果时间已过，返回 None（任务已完成）
+                if next_run <= now:
+                    return None
             else:
                 next_run = today
 
@@ -309,21 +332,39 @@ class ScheduledTaskManager:
         try:
             logging.info(f"执行定时任务: {task['name']}")
 
-            # 将消息添加到队列
-            self.message_queue.put({
-                'who': task['recipient'],
-                'content': task['message'],
-                'is_group': task['is_group'],
-                'at_list': task['at_list'],
-                'chat_name': task['recipient']
-            })
+            # 获取接收者列表（支持多个接收者，用逗号分隔）
+            recipients_str = task['recipient']
+            recipients = [r.strip() for r in recipients_str.split(',') if r.strip()]
+
+            if not recipients:
+                logging.error(f"定时任务 {task['name']} 没有有效的接收者")
+                return
+
+            # 为每个接收者添加消息到队列
+            for recipient in recipients:
+                self.message_queue.put({
+                    'who': recipient,
+                    'content': task['message'],
+                    'is_group': task['is_group'],
+                    'at_list': task['at_list'],
+                    'chat_name': recipient
+                })
+                logging.info(f"已为接收者 {recipient} 添加消息到队列")
 
             # 更新最后运行时间
             task['last_run'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            task['next_run'] = self.calculate_next_run(task)
+
+            # 如果是单次任务，执行后自动禁用
+            if task['schedule_type'] == 'once':
+                task['enabled'] = False
+                task['next_run'] = None
+                logging.info(f"单次任务 {task['name']} 已执行完成，自动禁用")
+            else:
+                task['next_run'] = self.calculate_next_run(task)
+
             self.save_tasks()
 
-            logging.info(f"定时任务已加入发送队列: {task['name']}")
+            logging.info(f"定时任务已加入发送队列: {task['name']} (共 {len(recipients)} 个接收者)")
         except Exception as e:
             logging.error(f"执行定时任务失败: {str(e)}")
             logging.error(traceback.format_exc())
@@ -343,6 +384,32 @@ class ScheduledTaskManager:
                 weekday_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
                 if 0 <= weekday < 7:
                     getattr(schedule.every(), weekday_names[weekday]).at(time_str).do(self.execute_task, task=task)
+            elif schedule_type == "once":
+                # 单次任务：创建一个包装函数，执行后自动取消
+                date_str = task.get("date", "")
+                if date_str:
+                    year, month, day = map(int, date_str.split("-"))
+                    hour, minute = map(int, time_str.split(":"))
+                    target_datetime = datetime(year, month, day, hour, minute, 0)
+
+                    # 计算距离目标时间的秒数
+                    now = datetime.now()
+                    if target_datetime > now:
+                        seconds_until = (target_datetime - now).total_seconds()
+
+                        # 创建包装函数，执行后返回 schedule.CancelJob 来取消任务
+                        def execute_once():
+                            self.execute_task(task)
+                            return schedule.CancelJob  # 执行后自动取消
+
+                        # 使用 schedule.every(N).seconds 并在执行后取消
+                        job = schedule.every(int(seconds_until)).seconds.do(execute_once)
+                        # 给任务添加标签，方便识别
+                        job.tag(f"once_{task['id']}")
+                        logging.info(f"已调度单次任务: {task['name']} - 将在 {target_datetime} 执行")
+                    else:
+                        logging.warning(f"单次任务 {task['name']} 的时间已过，跳过调度")
+                        return
 
             logging.info(f"已调度任务: {task['name']} - {schedule_type} at {time_str}")
         except Exception as e:
@@ -1241,11 +1308,16 @@ class WeChatGUI:
                 schedule_type_map = {
                     "daily": "每天",
                     "weekly": "每周",
-                    "weekday": f"周{['一', '二', '三', '四', '五', '六', '日'][task['weekday']]}"
+                    "weekday": f"周{['一', '二', '三', '四', '五', '六', '日'][task['weekday']]}",
+                    "once": f"单次({task.get('date', '未设置')})"
                 }
                 schedule_type = schedule_type_map.get(task["schedule_type"], task["schedule_type"])
                 status = "启用" if task["enabled"] else "禁用"
                 next_run = task.get("next_run", "未设置")
+
+                # 如果是单次任务且已执行，显示"已完成"
+                if task["schedule_type"] == "once" and not task["enabled"]:
+                    next_run = "已完成"
 
                 self.scheduled_tree.insert("", tk.END, values=(
                     task["id"],
@@ -1389,11 +1461,42 @@ class TaskDialog:
         ttk.Label(main_frame, text="调度类型:").grid(row=row, column=0, sticky=tk.W, pady=5)
         self.schedule_type_var = tk.StringVar(value="daily")
         schedule_type_combo = ttk.Combobox(main_frame, textvariable=self.schedule_type_var,
-                                          values=["daily", "weekly", "weekday"],
+                                          values=["daily", "weekly", "weekday", "once"],
                                           state="readonly", width=37)
         schedule_type_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
         schedule_type_combo.bind("<<ComboboxSelected>>", self.on_schedule_type_changed)
-        row += 1
+        ttk.Label(main_frame, text="(daily=每天, weekly=每周, weekday=特定星期, once=单次)").grid(row=row+1, column=1, sticky=tk.W)
+        row += 2
+
+        # 日期选择（仅once类型显示）
+        ttk.Label(main_frame, text="日期:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        date_frame = ttk.Frame(main_frame)
+        date_frame.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+
+        # 获取当前日期作为默认值
+        now = datetime.now()
+        self.year_var = tk.StringVar(value=str(now.year))
+        self.month_var = tk.StringVar(value=str(now.month))
+        self.day_var = tk.StringVar(value=str(now.day))
+
+        ttk.Label(date_frame, text="年:").grid(row=0, column=0, padx=(0, 5))
+        self.year_spinbox = ttk.Spinbox(date_frame, from_=2024, to=2030, textvariable=self.year_var,
+                                        width=6, format="%04.0f")
+        self.year_spinbox.grid(row=0, column=1, padx=(0, 10))
+
+        ttk.Label(date_frame, text="月:").grid(row=0, column=2, padx=(0, 5))
+        self.month_spinbox = ttk.Spinbox(date_frame, from_=1, to=12, textvariable=self.month_var,
+                                         width=4, format="%02.0f")
+        self.month_spinbox.grid(row=0, column=3, padx=(0, 10))
+
+        ttk.Label(date_frame, text="日:").grid(row=0, column=4, padx=(0, 5))
+        self.day_spinbox = ttk.Spinbox(date_frame, from_=1, to=31, textvariable=self.day_var,
+                                       width=4, format="%02.0f")
+        self.day_spinbox.grid(row=0, column=5)
+
+        self.date_label = ttk.Label(main_frame, text="(仅单次任务需要设置)")
+        self.date_label.grid(row=row+1, column=1, sticky=tk.W)
+        row += 2
 
         # 时间设置
         ttk.Label(main_frame, text="时间:").grid(row=row, column=0, sticky=tk.W, pady=5)
@@ -1425,14 +1528,51 @@ class TaskDialog:
         self.weekday_label.grid(row=row+1, column=1, sticky=tk.W)
         row += 2
 
-        # 接收者
-        ttk.Label(main_frame, text="接收者:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        # 接收者（支持多选）
+        ttk.Label(main_frame, text="接收者:").grid(row=row, column=0, sticky=(tk.W, tk.N), pady=5)
+
+        recipient_frame = ttk.Frame(main_frame)
+        recipient_frame.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+
+        # 接收者输入框（显示已选择的接收者，用逗号分隔）
         self.recipient_var = tk.StringVar()
+        recipient_entry = ttk.Entry(recipient_frame, textvariable=self.recipient_var, width=30)
+        recipient_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+
+        # 清空按钮
+        ttk.Button(recipient_frame, text="清空", command=self.clear_recipients, width=6).grid(row=0, column=1)
+
+        recipient_frame.columnconfigure(0, weight=1)
+
+        # 提示标签
+        ttk.Label(main_frame, text="(多个接收者用逗号分隔，或从下方列表双击添加)").grid(row=row+1, column=1, sticky=tk.W)
+        row += 2
+
+        # 可选接收者列表
+        ttk.Label(main_frame, text="可选列表:").grid(row=row, column=0, sticky=(tk.W, tk.N), pady=5)
+
+        listbox_frame = ttk.Frame(main_frame)
+        listbox_frame.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+
         # 从监听列表获取可选接收者
         listen_list = self.gui.get_listen_list()
-        recipient_combo = ttk.Combobox(main_frame, textvariable=self.recipient_var,
-                                      values=listen_list, width=37)
-        recipient_combo.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        self.recipient_listbox = tk.Listbox(listbox_frame, height=5, width=30)
+        self.recipient_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # 添加滚动条
+        recipient_scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=self.recipient_listbox.yview)
+        self.recipient_listbox.configure(yscrollcommand=recipient_scrollbar.set)
+        recipient_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+
+        # 填充监听列表
+        for item in listen_list:
+            self.recipient_listbox.insert(tk.END, item)
+
+        # 双击添加到接收者
+        self.recipient_listbox.bind('<Double-Button-1>', self.add_recipient_from_list)
+
+        listbox_frame.columnconfigure(0, weight=1)
+        listbox_frame.rowconfigure(0, weight=1)
         row += 1
 
         # 是否群聊
@@ -1475,12 +1615,26 @@ class TaskDialog:
     def on_schedule_type_changed(self, event=None):
         """调度类型改变时的处理"""
         schedule_type = self.schedule_type_var.get()
+
+        # 控制星期选择器
         if schedule_type == "weekday":
             self.weekday_combo.config(state="readonly")
             self.weekday_label.config(foreground="black")
         else:
             self.weekday_combo.config(state="disabled")
             self.weekday_label.config(foreground="gray")
+
+        # 控制日期选择器
+        if schedule_type == "once":
+            self.year_spinbox.config(state="normal")
+            self.month_spinbox.config(state="normal")
+            self.day_spinbox.config(state="normal")
+            self.date_label.config(foreground="black")
+        else:
+            self.year_spinbox.config(state="disabled")
+            self.month_spinbox.config(state="disabled")
+            self.day_spinbox.config(state="disabled")
+            self.date_label.config(foreground="gray")
 
     def on_is_group_changed(self):
         """群聊选项改变时的处理"""
@@ -1491,6 +1645,32 @@ class TaskDialog:
         else:
             self.at_list_entry.config(state="disabled")
             self.at_list_label.config(foreground="gray")
+
+    def add_recipient_from_list(self, event=None):
+        """从列表中添加接收者"""
+        try:
+            selection = self.recipient_listbox.curselection()
+            if not selection:
+                return
+
+            selected_item = self.recipient_listbox.get(selection[0])
+            current_recipients = self.recipient_var.get().strip()
+
+            # 检查是否已经存在
+            if current_recipients:
+                recipients_list = [r.strip() for r in current_recipients.split(',')]
+                if selected_item not in recipients_list:
+                    recipients_list.append(selected_item)
+                    self.recipient_var.set(', '.join(recipients_list))
+            else:
+                self.recipient_var.set(selected_item)
+
+        except Exception as e:
+            logging.error(f"添加接收者失败: {str(e)}")
+
+    def clear_recipients(self):
+        """清空接收者列表"""
+        self.recipient_var.set("")
 
     def load_task_data(self):
         """加载任务数据到表单"""
@@ -1506,6 +1686,19 @@ class TaskDialog:
         self.minute_var.set(minute)
 
         self.weekday_var.set(str(self.task.get("weekday", 0)))
+
+        # 加载日期（如果是单次任务）
+        if self.task.get("schedule_type") == "once" and "date" in self.task:
+            date_str = self.task.get("date", "")
+            if date_str:
+                try:
+                    year, month, day = date_str.split("-")
+                    self.year_var.set(year)
+                    self.month_var.set(month)
+                    self.day_var.set(day)
+                except:
+                    pass
+
         self.recipient_var.set(self.task.get("recipient", ""))
         self.is_group_var.set(self.task.get("is_group", False))
 
@@ -1566,6 +1759,24 @@ class TaskDialog:
                 "is_group": self.is_group_var.get(),
                 "at_list": at_list
             }
+
+            # 如果是单次任务，添加日期
+            if self.schedule_type_var.get() == "once":
+                year = int(self.year_var.get())
+                month = int(self.month_var.get())
+                day = int(self.day_var.get())
+
+                # 验证日期
+                try:
+                    target_date = datetime(year, month, day)
+                    # 检查日期是否在过去
+                    if target_date.date() < datetime.now().date():
+                        messagebox.showerror("错误", "日期不能是过去的日期")
+                        return
+                    task_data["date"] = f"{year:04d}-{month:02d}-{day:02d}"
+                except ValueError as e:
+                    messagebox.showerror("错误", f"无效的日期: {str(e)}")
+                    return
 
             # 保存任务
             if self.is_edit:
