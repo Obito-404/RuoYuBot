@@ -1585,14 +1585,23 @@ class WeChatGUI:
                         if any(keyword in content for keyword in task_keywords):
                             error_msg = f"❌ {parse_result['error']}\n\n"
                             error_msg += "📖 支持的格式:\n"
-                            error_msg += "• 单次任务 日期 时间 内容\n"
+                            error_msg += "• 单次任务 日期 时间 [@接收者] 内容\n"
                             error_msg += "  例: 单次任务 明天 15:30 提醒开会\n"
-                            error_msg += "• 每日任务 时间 内容\n"
+                            error_msg += "  例: 单次任务 明天 15:30 @张三 提醒开会\n"
+                            error_msg += "  例: 单次任务 明天 15:30 @张三,李四 提醒开会\n"
+                            error_msg += "• 每日任务 时间 [@接收者] 内容\n"
                             error_msg += "  例: 每日任务 09:00 早安问候\n"
-                            error_msg += "• 每周任务 星期 时间 内容\n"
+                            error_msg += "  例: 每日任务 09:00 @张三 早安问候\n"
+                            error_msg += "• 每周任务 星期 时间 [@接收者] 内容\n"
                             error_msg += "  例: 每周任务 周一 09:00 周会提醒\n"
-                            error_msg += "• 工作日 时间 内容\n"
-                            error_msg += "  例: 工作日 09:00 打卡提醒"
+                            error_msg += "  例: 每周任务 周一 09:00 @张三,李四 周会提醒\n"
+                            error_msg += "• 工作日 时间 [@接收者] 内容\n"
+                            error_msg += "  例: 工作日 09:00 打卡提醒\n"
+                            error_msg += "  例: 工作日 09:00 @张三 打卡提醒\n\n"
+                            error_msg += "💡 提示:\n"
+                            error_msg += "• 不指定接收者时，任务发给自己\n"
+                            error_msg += "• 多个接收者用逗号分隔，如: @张三,李四\n"
+                            error_msg += "• 接收者名称必须与微信中完全一致"
                             self.message_queue.put({
                                 'who': who,
                                 'content': error_msg,
