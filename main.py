@@ -1316,18 +1316,39 @@ class WeChatGUI:
             content = msg.content
 
             # 获取聊天名称（兼容不同版本的wxauto）
+            who = None
             if hasattr(chat, 'name'):
                 who = chat.name
             elif hasattr(chat, 'nickname'):
                 who = chat.nickname
             elif hasattr(chat, 'title'):
                 who = chat.title
-            else:
-                # 如果都没有，尝试从消息对象获取
-                who = getattr(msg, 'chat_name', 'Unknown')
+
+            # 如果都没有，尝试从消息对象获取
+            if not who:
+                who = getattr(msg, 'chat_name', None)
+
+            # 如果还是没有，尝试其他可能的属性
+            if not who:
                 # 记录调试信息
-                logging.debug(f"Chat对象属性: {dir(chat)}")
-                logging.debug(f"Message对象属性: {dir(msg)}")
+                logging.warning(f"无法获取聊天名称，Chat对象属性: {dir(chat)}")
+                logging.warning(f"Message对象属性: {dir(msg)}")
+
+                # 尝试更多可能的属性
+                for attr in ['who', 'chat', 'chatname', 'chat_nickname', 'contact']:
+                    if hasattr(chat, attr):
+                        who = getattr(chat, attr)
+                        logging.info(f"从 chat.{attr} 获取到名称: {who}")
+                        break
+                    if hasattr(msg, attr):
+                        who = getattr(msg, attr)
+                        logging.info(f"从 msg.{attr} 获取到名称: {who}")
+                        break
+
+            # 如果仍然无法获取，使用 Unknown
+            if not who:
+                who = 'Unknown'
+                logging.error(f"无法获取聊天名称，使用默认值: Unknown")
 
             # 获取发送者（兼容不同版本）
             if hasattr(msg, 'sender'):
