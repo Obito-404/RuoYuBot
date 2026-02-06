@@ -915,6 +915,21 @@ class WeChatGUI:
         # 创建定时任务标签页内容
         self.create_scheduled_tab(scheduled_tab)
 
+        # 绑定标签页切换事件
+        self.notebook.bind('<<NotebookTabChanged>>', self.on_tab_changed)
+
+    def on_tab_changed(self, event):
+        """标签页切换事件处理"""
+        try:
+            # 获取当前选中的标签页索引
+            current_tab = self.notebook.index(self.notebook.select())
+            # 如果切换到定时任务标签页（索引为1），刷新任务列表
+            if current_tab == 1:
+                self.refresh_scheduled_tasks()
+                logging.info("已自动刷新定时任务列表")
+        except Exception as e:
+            logging.error(f"标签页切换事件处理失败: {str(e)}")
+
     def create_main_tab(self, parent):
         """创建主控制标签页"""
         row = 0
