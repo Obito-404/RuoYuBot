@@ -252,6 +252,26 @@ class TaskCommandParser:
         return TaskCommandParser.WEEKDAY_MAP.get(weekday_str, None)
 
     @staticmethod
+    def parse_recipients(msg_content: str, sender: str) -> tuple:
+        """
+        解析接收者和消息内容
+        格式: @张三,李四 消息内容
+        返回: (recipients_list, actual_message)
+        """
+        import re
+
+        # 查找 @ 符号
+        match = re.match(r'^@([^\s]+)\s+(.+)$', msg_content)
+        if match:
+            recipients_str, actual_msg = match.groups()
+            # 分割多个接收者（逗号分隔）
+            recipients = [r.strip() for r in recipients_str.split(',') if r.strip()]
+            return (recipients, actual_msg)
+        else:
+            # 没有 @，默认发给发送者自己
+            return ([sender], msg_content)
+
+    @staticmethod
     def parse_task_command(message: str, sender: str) -> dict:
         """
         解析任务命令
@@ -292,15 +312,18 @@ class TaskCommandParser:
                 if not time:
                     return {'success': False, 'error': f'无法识别时间格式: {time_str}'}
 
+                # 解析接收者和实际消息内容
+                recipients, actual_msg = TaskCommandParser.parse_recipients(msg_content, sender)
+
                 return {
                     'success': True,
                     'task_data': {
-                        'name': f'[消息添加] {msg_content[:20]}',
+                        'name': f'[消息添加] {actual_msg[:20]}',
                         'schedule_type': 'once',
                         'date': date,
                         'time': time,
-                        'recipient': sender,
-                        'message': msg_content,
+                        'recipient': ', '.join(recipients),  # 多接收者用逗号分隔
+                        'message': actual_msg,
                         'is_group': False,
                         'at_list': None
                     }
@@ -322,14 +345,17 @@ class TaskCommandParser:
                 if not time:
                     return {'success': False, 'error': f'无法识别时间格式: {time_str}'}
 
+                # 解析接收者和实际消息内容
+                recipients, actual_msg = TaskCommandParser.parse_recipients(msg_content, sender)
+
                 return {
                     'success': True,
                     'task_data': {
-                        'name': f'[消息添加] {msg_content[:20]}',
+                        'name': f'[消息添加] {actual_msg[:20]}',
                         'schedule_type': 'daily',
                         'time': time,
-                        'recipient': sender,
-                        'message': msg_content,
+                        'recipient': ', '.join(recipients),
+                        'message': actual_msg,
                         'is_group': False,
                         'at_list': None
                     }
@@ -356,15 +382,18 @@ class TaskCommandParser:
                 if not time:
                     return {'success': False, 'error': f'无法识别时间格式: {time_str}'}
 
+                # 解析接收者和实际消息内容
+                recipients, actual_msg = TaskCommandParser.parse_recipients(msg_content, sender)
+
                 return {
                     'success': True,
                     'task_data': {
-                        'name': f'[消息添加] {msg_content[:20]}',
+                        'name': f'[消息添加] {actual_msg[:20]}',
                         'schedule_type': 'weekday',
                         'weekday': weekday,
                         'time': time,
-                        'recipient': sender,
-                        'message': msg_content,
+                        'recipient': ', '.join(recipients),
+                        'message': actual_msg,
                         'is_group': False,
                         'at_list': None
                     }
@@ -388,15 +417,18 @@ class TaskCommandParser:
                 if not time:
                     return {'success': False, 'error': f'无法识别时间格式: {time_str}'}
 
+                # 解析接收者和实际消息内容
+                recipients, actual_msg = TaskCommandParser.parse_recipients(msg_content, sender)
+
                 # 返回特殊标记，表示需要创建多个工作日任务
                 return {
                     'success': True,
                     'task_data': {
-                        'name': f'[消息添加] {msg_content[:20]}',
+                        'name': f'[消息添加] {actual_msg[:20]}',
                         'schedule_type': 'workday',  # 特殊标记
                         'time': time,
-                        'recipient': sender,
-                        'message': msg_content,
+                        'recipient': ', '.join(recipients),
+                        'message': actual_msg,
                         'is_group': False,
                         'at_list': None
                     }
@@ -1470,7 +1502,8 @@ class WeChatGUI:
                                     self.task_manager.reschedule_all_tasks()
 
                                 # 回复成功消息
-                                reply_msg = f"✅ 已成功添加工作日任务（周一至周五共{added_count}个任务）\n"
+                                reply_msg = f"✅ 已成功添加工作日任务（周一至周五共{added_count}个任务)\n"
+                                reply_msg += f"👤 接收者: {task_data['recipient']}\n"
                                 reply_msg += f"⏰ 时间: {task_data['time']}\n"
                                 reply_msg += f"📝 内容: {task_data['message']}"
                                 self.message_queue.put({
@@ -1499,6 +1532,7 @@ class WeChatGUI:
                                 type_name = schedule_type_names.get(task_data['schedule_type'], '任务')
 
                                 reply_msg = f"✅ 已成功添加{type_name}\n"
+                                reply_msg += f"👤 接收者: {task_data['recipient']}\n"
                                 if task_data['schedule_type'] == 'once':
                                     reply_msg += f"📅 日期: {task_data['date']}\n"
                                 elif task_data['schedule_type'] == 'weekday':
