@@ -1555,12 +1555,19 @@ class WeChatGUI:
                     if recipient and recipient not in scheduled_recipients:
                         scheduled_recipients.append(recipient)
 
-        # 合并并去重监听列表
-        combined_list = list(set(listen_list + scheduled_recipients))
+        # 获取任务管理员列表
+        task_admins = config.get_task_admin_list()
+
+        # 合并并去重监听列表（包括监听对象、定时任务接收者、任务管理员）
+        combined_list = list(set(listen_list + scheduled_recipients + task_admins))
 
         if scheduled_recipients:
             logging.info(f"从定时任务中添加了 {len(scheduled_recipients)} 个接收者到监听列表")
             logging.info(f"定时任务接收者: {', '.join(scheduled_recipients)}")
+
+        if task_admins:
+            logging.info(f"添加了 {len(task_admins)} 个任务管理员到监听列表")
+            logging.info(f"任务管理员: {', '.join(task_admins)}")
 
         logging.info(f"最终监听列表（共 {len(combined_list)} 个）: {', '.join(combined_list)}")
 
