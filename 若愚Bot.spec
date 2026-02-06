@@ -84,21 +84,17 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-# 单文件模式（onefile）
-# 注意：onefile 模式可能会有 DLL 加载问题，建议使用 onedir 模式
+# 文件夹模式（onedir）- 推荐使用，DLL 加载更稳定
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='若愚Bot',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -106,4 +102,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='icon.ico',
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='若愚Bot',
 )

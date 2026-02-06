@@ -1,5 +1,49 @@
 # PyInstaller 打包故障排除
 
+## ⚠️ 重要：ctypes DLL 加载失败问题
+
+### 问题描述
+打包后运行出现错误：
+```
+ImportError: DLL load failed while importing _ctypes: 找不到指定的模块。
+```
+
+### 根本原因
+这是 PyInstaller **单文件模式（onefile）** 的已知问题：
+
+1. **单文件模式工作原理**：将所有文件打包到一个 exe 中，运行时解压到临时目录（`_MEIxxxxxx`）
+2. **DLL 加载问题**：Windows 的 DLL 搜索路径可能找不到临时目录中的 DLL
+3. **ctypes 特殊性**：ctypes 模块对 DLL 路径特别敏感，在临时目录中经常加载失败
+4. **无法完全解决**：即使手动添加 DLL 到 binaries，onefile 模式仍可能失败
+
+### ✅ 推荐解决方案：使用文件夹模式（onedir）
+
+运行 `build.bat`，选择 **[1] 快速打包（推荐）**
+
+**为什么 onedir 模式可以解决问题：**
+- 所有 DLL 文件都在同一目录下，Windows 可以正确找到
+- 不需要解压到临时目录，避免了路径问题
+- 启动速度更快，更稳定
+
+**onedir 模式的优缺点：**
+- ✅ DLL 加载稳定可靠
+- ✅ 启动速度快
+- ✅ 便于调试和更新
+- ✅ 兼容性好
+- ❌ 生成一个文件夹而不是单个 exe
+- ❌ 分发时需要打包整个文件夹（可以用 7-Zip 制作自解压包）
+
+### ❌ 不推荐：继续使用单文件模式
+
+单文件模式（onefile）对于使用 wxauto 和 comtypes 的项目来说，**几乎无法可靠工作**。
+
+如果必须使用单文件分发，建议：
+1. 使用 onedir 模式打包
+2. 用 7-Zip 或 WinRAR 制作自解压 exe
+3. 这样既能单文件分发，又能避免 DLL 加载问题
+
+---
+
 ## 问题：DLL load failed while importing ctypes
 
 ### 原因
