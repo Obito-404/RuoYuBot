@@ -1101,9 +1101,28 @@ class WeChatGUI:
         if not self.is_running:
             # 获取监听对象列表
             listen_list = self.get_listen_list()
-            if not listen_list:
-                logging.error("请至少添加一个监听对象")
+
+            # 获取定时任务的接收者列表
+            scheduled_recipients = []
+            if self.task_manager:
+                tasks = self.task_manager.get_all_tasks()
+                for task in tasks:
+                    if task.get('enabled', False):
+                        recipient = task.get('recipient', '')
+                        if recipient:
+                            # 处理多接收者（逗号分隔）
+                            recipients = [r.strip() for r in recipient.split(',') if r.strip()]
+                            for r in recipients:
+                                if r not in scheduled_recipients:
+                                    scheduled_recipients.append(r)
+
+            # 检查是否至少有一个监听对象或定时任务接收者
+            if not listen_list and not scheduled_recipients:
+                logging.error("请至少添加一个监听对象或创建一个定时任务")
                 return
+
+            if not listen_list and scheduled_recipients:
+                logging.info(f"未配置监听对象，将使用定时任务接收者: {', '.join(scheduled_recipients)}")
 
             # 保存当前设置到配置文件
             self.save_listen_list()
