@@ -58,10 +58,17 @@ pip install -r requirements.txt
 python main.py
 ```
 
-4. 打包命令：
+4. 打包程序：
 ```bash
- pyinstaller --noconfirm --onefile --windowed --name "RuoYuBot" --icon "D:/ruoyubot/icon.ico" --hidden-import comtypes --hidden-import comtypes.stream --hidden-import comtypes.gen --hidden-import win32com --hidden-import win32com.client "D:/ruoyubot/main.py"
+# 双击运行打包脚本
+打包.bat
+
+# 或使用命令行
+# 推荐：快速打包（文件夹模式）
+pyinstaller --clean --onedir --windowed --name "若愚Bot" --icon "icon.ico" --collect-all wxauto --collect-all comtypes main.py
 ```
+
+详细的打包说明请查看 [PACKAGING_TROUBLESHOOTING.md](PACKAGING_TROUBLESHOOTING.md)
 
 ## 依赖说明
 
