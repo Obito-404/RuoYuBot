@@ -1317,7 +1317,10 @@ class WeChatGUI:
 
             # 获取聊天名称（兼容不同版本的wxauto）
             who = None
-            if hasattr(chat, 'name'):
+            # 优先尝试 who 属性（新版本 wxauto）
+            if hasattr(chat, 'who'):
+                who = chat.who
+            elif hasattr(chat, 'name'):
                 who = chat.name
             elif hasattr(chat, 'nickname'):
                 who = chat.nickname
@@ -1335,7 +1338,7 @@ class WeChatGUI:
                 logging.warning(f"Message对象属性: {dir(msg)}")
 
                 # 尝试更多可能的属性
-                for attr in ['who', 'chat', 'chatname', 'chat_nickname', 'contact']:
+                for attr in ['chat', 'chatname', 'chat_nickname', 'contact']:
                     if hasattr(chat, attr):
                         who = getattr(chat, attr)
                         logging.info(f"从 chat.{attr} 获取到名称: {who}")
@@ -1441,7 +1444,7 @@ class WeChatGUI:
                 logging.info(f"收到来自 {who} 的私聊消息: {content}")
 
                 # 首先检查是否是任务命令
-                task_admin_list = self.config.get_task_admin_list()
+                task_admin_list = config.get_task_admin_list()
                 if task_admin_list and who in task_admin_list:
                     # 尝试解析任务命令
                     parse_result = TaskCommandParser.parse_task_command(content, who)
