@@ -73,28 +73,9 @@ goto :eof
 
 :build_onedir
 echo [2/3] 开始打包（文件夹模式）...
-pyinstaller --clean ^
-    --onedir ^
-    --windowed ^
-    --name "若愚Bot" ^
-    --icon "icon.ico" ^
-    --collect-all wxauto ^
-    --collect-all comtypes ^
-    --hidden-import ctypes ^
-    --hidden-import ctypes.wintypes ^
-    --hidden-import _ctypes ^
-    --hidden-import comtypes.stream ^
-    --hidden-import comtypes.gen ^
-    --hidden-import win32com ^
-    --hidden-import win32com.client ^
-    --hidden-import win32timezone ^
-    --hidden-import win32api ^
-    --hidden-import win32con ^
-    --hidden-import win32gui ^
-    --hidden-import win32process ^
-    --hidden-import pywintypes ^
-    --hidden-import schedule ^
-    main.py
+echo 使用 spec 文件打包，会自动包含必要的 DLL...
+echo.
+pyinstaller --clean 若愚Bot.spec
 
 if %errorlevel% neq 0 (
     echo.
