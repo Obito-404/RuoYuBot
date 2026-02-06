@@ -98,7 +98,8 @@ class Config:
             'retry_count': '3',  # 消息发送重试次数
             'retry_delay': '5',  # 重试延迟时间（秒）
             'log_level': 'INFO',  # 日志级别
-            'api_token': ''  # API Token
+            'api_token': '',  # API Token
+            'task_admin_list': ''  # 允许通过消息添加任务的用户列表（逗号分隔）
         }
         try:
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -140,6 +141,19 @@ class Config:
         with open(self.config_path, 'w', encoding='utf-8') as f:
             self.config.write(f)
 
+    def get_task_admin_list(self) -> List[str]:
+        """获取任务管理员列表"""
+        admin_list = self.config['DEFAULT'].get('task_admin_list', '')
+        if not admin_list:
+            return []
+        return [x.strip() for x in admin_list.split(',') if x.strip()]
+
+    def set_task_admin_list(self, admins: List[str]):
+        """设置任务管理员列表"""
+        self.config['DEFAULT']['task_admin_list'] = ','.join(admins)
+        with open(self.config_path, 'w', encoding='utf-8') as f:
+            self.config.write(f)
+
     def get_scheduled_tasks_path(self) -> Path:
         """获取定时任务配置文件路径"""
         return Path("scheduled_tasks.json")
@@ -164,6 +178,232 @@ class Config:
                 json.dump(tasks_data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logging.error(f"保存定时任务失败: {str(e)}")
+
+
+# 任务命令解析器
+class TaskCommandParser:
+    """解析微信消息中的任务命令"""
+
+    # 星期映射
+    WEEKDAY_MAP = {
+        '周一': 0, '星期一': 0, '礼拜一': 0,
+        '周二': 1, '星期二': 1, '礼拜二': 1,
+        '周三': 2, '星期三': 2, '礼拜三': 2,
+        '周四': 3, '星期四': 3, '礼拜四': 3,
+        '周五': 4, '星期五': 4, '礼拜五': 4,
+        '周六': 5, '星期六': 5, '礼拜六': 5,
+        '周日': 6, '星期日': 6, '礼拜日': 6, '周天': 6, '星期天': 6
+    }
+
+    @staticmethod
+    def parse_natural_date(date_str: str) -> str:
+        """解析自然语言日期（今天、明天、后天）"""
+        today = datetime.now()
+        if date_str in ['今天', '今日']:
+            return today.strftime('%Y-%m-%d')
+        elif date_str in ['明天', '明日']:
+            return (today + timedelta(days=1)).strftime('%Y-%m-%d')
+        elif date_str in ['后天']:
+            return (today + timedelta(days=2)).strftime('%Y-%m-%d')
+        else:
+            # 尝试解析标准日期格式
+            try:
+                # 支持多种日期格式
+                for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d', '%m-%d', '%m/%d']:
+                    try:
+                        parsed_date = datetime.strptime(date_str, fmt)
+                        # 如果只有月日，补充年份
+                        if fmt in ['%m-%d', '%m/%d']:
+                            parsed_date = parsed_date.replace(year=today.year)
+                            # 如果日期已过，使用明年
+                            if parsed_date < today:
+                                parsed_date = parsed_date.replace(year=today.year + 1)
+                        return parsed_date.strftime('%Y-%m-%d')
+                    except ValueError:
+                        continue
+            except:
+                pass
+        return None
+
+    @staticmethod
+    def parse_time(time_str: str) -> str:
+        """解析时间格式"""
+        import re
+        # 匹配 HH:MM 或 HH时MM分 格式
+        patterns = [
+            r'(\d{1,2}):(\d{2})',
+            r'(\d{1,2})时(\d{2})分',
+            r'(\d{1,2})点(\d{2})分',
+        ]
+
+        for pattern in patterns:
+            match = re.match(pattern, time_str)
+            if match:
+                hour, minute = match.groups()
+                hour = int(hour)
+                minute = int(minute)
+                if 0 <= hour <= 23 and 0 <= minute <= 59:
+                    return f"{hour:02d}:{minute:02d}"
+        return None
+
+    @staticmethod
+    def parse_weekday(weekday_str: str) -> int:
+        """解析星期"""
+        return TaskCommandParser.WEEKDAY_MAP.get(weekday_str, None)
+
+    @staticmethod
+    def parse_task_command(message: str, sender: str) -> dict:
+        """
+        解析任务命令
+        返回格式: {
+            'success': bool,
+            'task_data': dict,  # 如果成功
+            'error': str  # 如果失败
+        }
+        """
+        import re
+
+        message = message.strip()
+
+        # 单次任务格式: 单次任务 日期 时间 消息内容
+        # 例: 单次任务 2026-02-10 15:30 提醒开会
+        # 例: 单次任务 明天 15:30 提醒开会
+        once_patterns = [
+            r'^(单次任务|一次性任务|once)\s+(\S+)\s+(\S+)\s+(.+)$',
+        ]
+
+        for pattern in once_patterns:
+            match = re.match(pattern, message, re.IGNORECASE)
+            if match:
+                _, date_str, time_str, msg_content = match.groups()
+
+                # 解析日期
+                date = TaskCommandParser.parse_natural_date(date_str)
+                if not date:
+                    return {'success': False, 'error': f'无法识别日期格式: {date_str}'}
+
+                # 检查日期是否在过去
+                task_datetime = datetime.strptime(f"{date} {time_str}", "%Y-%m-%d %H:%M")
+                if task_datetime < datetime.now():
+                    return {'success': False, 'error': '任务时间不能是过去的时间'}
+
+                # 解析时间
+                time = TaskCommandParser.parse_time(time_str)
+                if not time:
+                    return {'success': False, 'error': f'无法识别时间格式: {time_str}'}
+
+                return {
+                    'success': True,
+                    'task_data': {
+                        'name': f'[消息添加] {msg_content[:20]}',
+                        'schedule_type': 'once',
+                        'date': date,
+                        'time': time,
+                        'recipient': sender,
+                        'message': msg_content,
+                        'is_group': False,
+                        'at_list': None
+                    }
+                }
+
+        # 每日任务格式: 每日任务 时间 消息内容
+        # 例: 每日任务 09:00 早安问候
+        daily_patterns = [
+            r'^(每日任务|每天|daily)\s+(\S+)\s+(.+)$',
+        ]
+
+        for pattern in daily_patterns:
+            match = re.match(pattern, message, re.IGNORECASE)
+            if match:
+                _, time_str, msg_content = match.groups()
+
+                # 解析时间
+                time = TaskCommandParser.parse_time(time_str)
+                if not time:
+                    return {'success': False, 'error': f'无法识别时间格式: {time_str}'}
+
+                return {
+                    'success': True,
+                    'task_data': {
+                        'name': f'[消息添加] {msg_content[:20]}',
+                        'schedule_type': 'daily',
+                        'time': time,
+                        'recipient': sender,
+                        'message': msg_content,
+                        'is_group': False,
+                        'at_list': None
+                    }
+                }
+
+        # 每周任务格式: 每周任务 星期 时间 消息内容
+        # 例: 每周任务 周一 09:00 周会提醒
+        weekly_patterns = [
+            r'^(每周任务|每周|weekly)\s+(\S+)\s+(\S+)\s+(.+)$',
+        ]
+
+        for pattern in weekly_patterns:
+            match = re.match(pattern, message, re.IGNORECASE)
+            if match:
+                _, weekday_str, time_str, msg_content = match.groups()
+
+                # 解析星期
+                weekday = TaskCommandParser.parse_weekday(weekday_str)
+                if weekday is None:
+                    return {'success': False, 'error': f'无法识别星期格式: {weekday_str}'}
+
+                # 解析时间
+                time = TaskCommandParser.parse_time(time_str)
+                if not time:
+                    return {'success': False, 'error': f'无法识别时间格式: {time_str}'}
+
+                return {
+                    'success': True,
+                    'task_data': {
+                        'name': f'[消息添加] {msg_content[:20]}',
+                        'schedule_type': 'weekday',
+                        'weekday': weekday,
+                        'time': time,
+                        'recipient': sender,
+                        'message': msg_content,
+                        'is_group': False,
+                        'at_list': None
+                    }
+                }
+
+        # 工作日任务格式: 工作日 时间 消息内容
+        # 例: 工作日 09:00 打卡提醒
+        # 注意：这里使用 weekday 类型，但需要为每个工作日（周一到周五）创建5个任务
+        # 为了简化，我们返回一个特殊标记，让调用者处理
+        workday_patterns = [
+            r'^(工作日|weekday)\s+(\S+)\s+(.+)$',
+        ]
+
+        for pattern in workday_patterns:
+            match = re.match(pattern, message, re.IGNORECASE)
+            if match:
+                _, time_str, msg_content = match.groups()
+
+                # 解析时间
+                time = TaskCommandParser.parse_time(time_str)
+                if not time:
+                    return {'success': False, 'error': f'无法识别时间格式: {time_str}'}
+
+                # 返回特殊标记，表示需要创建多个工作日任务
+                return {
+                    'success': True,
+                    'task_data': {
+                        'name': f'[消息添加] {msg_content[:20]}',
+                        'schedule_type': 'workday',  # 特殊标记
+                        'time': time,
+                        'recipient': sender,
+                        'message': msg_content,
+                        'is_group': False,
+                        'at_list': None
+                    }
+                }
+
+        # 没有匹配任何格式
+        return {'success': False, 'error': '无法识别任务格式'}
 
 
 # 定时任务管理器
@@ -1140,6 +1380,95 @@ class WeChatGUI:
             else:
                 # 私聊消息
                 logging.info(f"收到来自 {who} 的私聊消息: {content}")
+
+                # 首先检查是否是任务命令
+                task_admin_list = self.config.get_task_admin_list()
+                if task_admin_list and who in task_admin_list:
+                    # 尝试解析任务命令
+                    parse_result = TaskCommandParser.parse_task_command(content, who)
+                    if parse_result['success']:
+                        try:
+                            task_data = parse_result['task_data']
+
+                            # 处理工作日任务（需要创建5个任务）
+                            if task_data.get('schedule_type') == 'workday':
+                                # 为周一到周五创建5个任务
+                                weekday_names = ['周一', '周二', '周三', '周四', '周五']
+                                added_count = 0
+                                for i in range(5):
+                                    workday_task = task_data.copy()
+                                    workday_task['schedule_type'] = 'weekday'
+                                    workday_task['weekday'] = i
+                                    workday_task['name'] = f"[消息添加] {weekday_names[i]} {task_data['message'][:15]}"
+                                    self.task_manager.add_task(workday_task)
+                                    added_count += 1
+
+                                # 重新调度所有任务
+                                if self.task_manager.is_running:
+                                    self.task_manager.reschedule_all_tasks()
+
+                                # 回复成功消息
+                                reply_msg = f"✅ 已成功添加工作日任务（周一至周五共{added_count}个任务）\n"
+                                reply_msg += f"⏰ 时间: {task_data['time']}\n"
+                                reply_msg += f"📝 内容: {task_data['message']}"
+                                self.message_queue.put((who, reply_msg, None))
+                                logging.info(f"已为 {who} 添加工作日任务")
+                                return  # 不再继续处理webhook
+                            else:
+                                # 添加单个任务
+                                task_id = self.task_manager.add_task(task_data)
+
+                                # 重新调度所有任务
+                                if self.task_manager.is_running:
+                                    self.task_manager.reschedule_all_tasks()
+
+                                # 构建回复消息
+                                schedule_type_names = {
+                                    'once': '单次任务',
+                                    'daily': '每日任务',
+                                    'weekday': '每周任务'
+                                }
+                                type_name = schedule_type_names.get(task_data['schedule_type'], '任务')
+
+                                reply_msg = f"✅ 已成功添加{type_name}\n"
+                                if task_data['schedule_type'] == 'once':
+                                    reply_msg += f"📅 日期: {task_data['date']}\n"
+                                elif task_data['schedule_type'] == 'weekday':
+                                    weekday_names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+                                    reply_msg += f"📅 星期: {weekday_names[task_data['weekday']]}\n"
+                                reply_msg += f"⏰ 时间: {task_data['time']}\n"
+                                reply_msg += f"📝 内容: {task_data['message']}"
+
+                                self.message_queue.put((who, reply_msg, None))
+                                logging.info(f"已为 {who} 添加任务: {task_data['name']}")
+                                return  # 不再继续处理webhook
+
+                        except Exception as e:
+                            error_msg = f"❌ 添加任务失败: {str(e)}"
+                            self.message_queue.put((who, error_msg, None))
+                            logging.error(f"添加任务失败: {str(e)}")
+                            logging.error(traceback.format_exc())
+                            return
+                    else:
+                        # 解析失败，但可能是任务命令格式错误
+                        # 检查是否包含任务关键词
+                        task_keywords = ['任务', 'task', '每日', '每周', '单次', '一次性', '工作日', 'daily', 'weekly', 'once', 'weekday']
+                        if any(keyword in content for keyword in task_keywords):
+                            error_msg = f"❌ {parse_result['error']}\n\n"
+                            error_msg += "📖 支持的格式:\n"
+                            error_msg += "• 单次任务 日期 时间 内容\n"
+                            error_msg += "  例: 单次任务 明天 15:30 提醒开会\n"
+                            error_msg += "• 每日任务 时间 内容\n"
+                            error_msg += "  例: 每日任务 09:00 早安问候\n"
+                            error_msg += "• 每周任务 星期 时间 内容\n"
+                            error_msg += "  例: 每周任务 周一 09:00 周会提醒\n"
+                            error_msg += "• 工作日 时间 内容\n"
+                            error_msg += "  例: 工作日 09:00 打卡提醒"
+                            self.message_queue.put((who, error_msg, None))
+                            logging.info(f"任务命令格式错误: {parse_result['error']}")
+                            return
+
+                # 如果不是任务命令或用户无权限，继续正常的webhook处理
                 try:
                     data = {
                         "target_user": who,
