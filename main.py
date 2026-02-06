@@ -938,6 +938,25 @@ class WeChatGUI:
         # 初始化当前webhook URL
         self.update_webhook_url()
 
+        # 任务管理员列表输入区域
+        task_admin_frame = ttk.Frame(parent, style='Main.TFrame')
+        task_admin_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        ttk.Label(task_admin_frame, text="任务管理员 (允许通过消息添加任务的用户，每行一个):", style='Label.TLabel').grid(row=0, column=0, sticky=tk.W)
+        self.task_admin_text = scrolledtext.ScrolledText(task_admin_frame, height=3, width=60,
+                                                         font=self.log_font, bg='white',
+                                                         relief='solid', borderwidth=1)
+        self.task_admin_text.grid(row=1, column=0, columnspan=2, pady=(5, 0), sticky=(tk.W, tk.E))
+        # 加载现有的任务管理员列表
+        task_admins = config.get_task_admin_list()
+        if task_admins:
+            self.task_admin_text.insert(tk.END, "\n".join(task_admins))
+
+        update_admin_button = ttk.Button(task_admin_frame, text="更新", command=self.update_task_admin_list,
+                                        style='Button.TButton', width=8)
+        update_admin_button.grid(row=2, column=0, sticky=tk.E, pady=(5, 0))
+        row += 1
+
         # 监听对象输入区域
         listen_frame = ttk.Frame(parent, style='Main.TFrame')
         listen_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
@@ -1620,6 +1639,18 @@ class WeChatGUI:
             logging.info("回调地址已更新")
         except Exception as e:
             logging.error(f"更新回调地址失败: {str(e)}")
+
+    def update_task_admin_list(self):
+        """更新任务管理员列表"""
+        try:
+            admins = [admin.strip() for admin in self.task_admin_text.get("1.0", tk.END).split('\n') if admin.strip()]
+            config.set_task_admin_list(admins)
+            if admins:
+                logging.info(f"任务管理员列表已更新: {', '.join(admins)}")
+            else:
+                logging.info("任务管理员列表已清空（消息添加任务功能已禁用）")
+        except Exception as e:
+            logging.error(f"更新任务管理员列表失败: {str(e)}")
 
     def refresh_scheduled_tasks(self):
         """刷新定时任务列表"""
