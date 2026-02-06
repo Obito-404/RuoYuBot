@@ -1473,7 +1473,13 @@ class WeChatGUI:
                                 reply_msg = f"✅ 已成功添加工作日任务（周一至周五共{added_count}个任务）\n"
                                 reply_msg += f"⏰ 时间: {task_data['time']}\n"
                                 reply_msg += f"📝 内容: {task_data['message']}"
-                                self.message_queue.put((who, reply_msg, None))
+                                self.message_queue.put({
+                                    'who': who,
+                                    'content': reply_msg,
+                                    'is_group': False,
+                                    'at_list': None,
+                                    'chat_name': who
+                                })
                                 logging.info(f"已为 {who} 添加工作日任务")
                                 return  # 不再继续处理webhook
                             else:
@@ -1501,13 +1507,25 @@ class WeChatGUI:
                                 reply_msg += f"⏰ 时间: {task_data['time']}\n"
                                 reply_msg += f"📝 内容: {task_data['message']}"
 
-                                self.message_queue.put((who, reply_msg, None))
+                                self.message_queue.put({
+                                    'who': who,
+                                    'content': reply_msg,
+                                    'is_group': False,
+                                    'at_list': None,
+                                    'chat_name': who
+                                })
                                 logging.info(f"已为 {who} 添加任务: {task_data['name']}")
                                 return  # 不再继续处理webhook
 
                         except Exception as e:
                             error_msg = f"❌ 添加任务失败: {str(e)}"
-                            self.message_queue.put((who, error_msg, None))
+                            self.message_queue.put({
+                                'who': who,
+                                'content': error_msg,
+                                'is_group': False,
+                                'at_list': None,
+                                'chat_name': who
+                            })
                             logging.error(f"添加任务失败: {str(e)}")
                             logging.error(traceback.format_exc())
                             return
@@ -1526,7 +1544,13 @@ class WeChatGUI:
                             error_msg += "  例: 每周任务 周一 09:00 周会提醒\n"
                             error_msg += "• 工作日 时间 内容\n"
                             error_msg += "  例: 工作日 09:00 打卡提醒"
-                            self.message_queue.put((who, error_msg, None))
+                            self.message_queue.put({
+                                'who': who,
+                                'content': error_msg,
+                                'is_group': False,
+                                'at_list': None,
+                                'chat_name': who
+                            })
                             logging.info(f"任务命令格式错误: {parse_result['error']}")
                             return
 
