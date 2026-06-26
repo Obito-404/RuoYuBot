@@ -1,5 +1,5 @@
 # 运行依赖
-wxauto>=1.0.0
+wxauto @ git+https://github.com/cluic/wxauto.git
 requests>=2.31.0
 flask>=2.3.0
 pywin32>=306

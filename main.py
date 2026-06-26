@@ -8,7 +8,7 @@ import threading
 import win32gui
 import win32con
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 import socket
 import queue
 import logging
@@ -447,6 +447,16 @@ class ScheduledTaskManager:
         self.is_running = False
         self.load_tasks()
 
+    @staticmethod
+    def normalize_file_paths(file_paths) -> List[str]:
+        if not file_paths:
+            return []
+        if isinstance(file_paths, str):
+            raw_paths = file_paths.replace(";", "\n").splitlines()
+        else:
+            raw_paths = file_paths
+        return [str(path).strip().strip('"') for path in raw_paths if str(path).strip()]
+
     def load_tasks(self):
         """从配置文件加载任务"""
         try:
@@ -478,6 +488,7 @@ class ScheduledTaskManager:
             "weekday": task_data.get("weekday", 0),
             "recipient": task_data.get("recipient", ""),
             "message": task_data.get("message", ""),
+            "file_paths": self.normalize_file_paths(task_data.get("file_paths", [])),
             "is_group": task_data.get("is_group", False),
             "at_list": task_data.get("at_list", None),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -505,6 +516,7 @@ class ScheduledTaskManager:
                 task["weekday"] = task_data.get("weekday", task["weekday"])
                 task["recipient"] = task_data.get("recipient", task["recipient"])
                 task["message"] = task_data.get("message", task["message"])
+                task["file_paths"] = self.normalize_file_paths(task_data.get("file_paths", task.get("file_paths", [])))
                 task["is_group"] = task_data.get("is_group", task["is_group"])
                 task["at_list"] = task_data.get("at_list", task["at_list"])
 
@@ -528,6 +540,24 @@ class ScheduledTaskManager:
                 logging.info(f"已删除定时任务: {task_name}")
                 return True
         return False
+
+    def duplicate_task(self, task_id: str):
+        """Copy a task into a new enabled task."""
+        for task in self.tasks:
+            if task["id"] == task_id:
+                new_task = task.copy()
+                new_task["id"] = str(uuid.uuid4())
+                new_task["name"] = f"{task.get('name', '')} - 副本"
+                new_task["enabled"] = True
+                new_task["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                new_task["last_run"] = None
+                new_task["file_paths"] = self.normalize_file_paths(task.get("file_paths", []))
+                new_task["next_run"] = self.calculate_next_run(new_task)
+                self.tasks.append(new_task)
+                self.save_tasks()
+                logging.info(f"已复制定时任务: {task['name']} -> {new_task['name']}")
+                return new_task["id"]
+        return None
 
     def toggle_task_enabled(self, task_id: str):
         """切换任务启用状态"""
@@ -613,10 +643,17 @@ class ScheduledTaskManager:
                 return
 
             # 为每个接收者添加消息到队列
+            file_paths = self.normalize_file_paths(task.get("file_paths", []))
+            message = task.get("message", "")
+            if not message and not file_paths:
+                logging.error(f"定时任务 {task['name']} 没有消息内容或附件")
+                return
+
             for recipient in recipients:
                 self.message_queue.put({
                     'who': recipient,
-                    'content': task['message'],
+                    'content': message,
+                    'file_paths': file_paths,
                     'is_group': task['is_group'],
                     'at_list': task['at_list'],
                     'chat_name': recipient
@@ -1065,8 +1102,10 @@ class WeChatGUI:
         list_frame = ttk.LabelFrame(parent, text="任务列表", style='Log.TFrame', padding="10")
         list_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 15))
 
-        columns = ("id", "name", "type", "time", "recipient", "status", "next_run")
+        columns = ("id", "name", "type", "time", "recipient", "attachments", "status", "next_run")
         self.scheduled_tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+        self.scheduled_tree.heading("attachments", text="附件")
+        self.scheduled_tree.column("attachments", width=80)
 
         # 设置列标题
         self.scheduled_tree.heading("id", text="ID")
@@ -1105,6 +1144,8 @@ class WeChatGUI:
                   style='Button.TButton', width=12).grid(row=0, column=0, padx=5)
         ttk.Button(button_frame, text="编辑任务", command=self.open_edit_task_dialog,
                   style='Button.TButton', width=12).grid(row=0, column=1, padx=5)
+        ttk.Button(button_frame, text="复制任务", command=self.copy_selected_task,
+                  style='Button.TButton', width=12).grid(row=0, column=5, padx=5)
         ttk.Button(button_frame, text="删除任务", command=self.delete_selected_task,
                   style='Button.TButton', width=12).grid(row=0, column=2, padx=5)
         ttk.Button(button_frame, text="启用/禁用", command=self.toggle_task_enabled,
@@ -1293,7 +1334,22 @@ class WeChatGUI:
         if expired_keys:
             logging.info(f"已清理 {len(expired_keys)} 条过期消息缓存")
 
-    def send_message_with_retry(self, who, content, max_retries=3, is_group=False, at_list=None, chat_name=None):
+    def send_message_with_retry(self, who, content, max_retries=3, is_group=False, at_list=None, chat_name=None, file_paths=None):
+        if file_paths is None:
+            file_paths = []
+        elif isinstance(file_paths, str):
+            file_paths = [path.strip().strip('"') for path in file_paths.replace(";", "\n").splitlines() if path.strip()]
+        else:
+            file_paths = [str(path).strip().strip('"') for path in file_paths if str(path).strip()]
+
+        missing_files = [path for path in file_paths if not os.path.isabs(path) or not os.path.isfile(path)]
+        if missing_files:
+            logging.error(f"附件路径无效或文件不存在: {missing_files}")
+            return False
+
+        if not content and not file_paths:
+            logging.error("消息内容和附件都为空，取消发送")
+            return False
         for attempt in range(max_retries):
             try:
                 logging.info(f"\n尝试发送消息 (第 {attempt + 1} 次):")
@@ -1305,7 +1361,7 @@ class WeChatGUI:
                         logging.info(f"- @列表: {at_list}")
 
                 # 根据是否是群聊和是否有@列表来决定发送方式
-                if is_group:
+                if content and is_group:
                     # 群聊消息
                     if at_list:
                         if at_list == ['all']:
@@ -1317,11 +1373,16 @@ class WeChatGUI:
                     else:
                         # 普通群聊消息
                         wx.SendMsg(msg=content, who=who)
-                else:
+                elif content:
                     # 私聊消息
                     wx.SendMsg(msg=content, who=who)
 
                 # 发送后等待一段时间，确保消息发送完成
+                if file_paths:
+                    filepath = file_paths[0] if len(file_paths) == 1 else file_paths
+                    response = wx.SendFiles(filepath=filepath, who=who, exact=False)
+                    logging.info(f"附件发送结果: {response}")
+
                 time.sleep(0.5)
                 logging.info("消息发送成功")
                 return True
@@ -1811,12 +1872,16 @@ class WeChatGUI:
                 if task["schedule_type"] == "once" and not task["enabled"]:
                     next_run = "已完成"
 
+                file_count = len(ScheduledTaskManager.normalize_file_paths(task.get("file_paths", [])))
+                attachments_text = f"{file_count}个" if file_count else ""
+
                 self.scheduled_tree.insert("", tk.END, values=(
                     task["id"],
                     task["name"],
                     schedule_type,
                     task["time"],
                     task["recipient"],
+                    attachments_text,
                     status,
                     next_run
                 ))
@@ -1853,6 +1918,28 @@ class WeChatGUI:
         except Exception as e:
             logging.error(f"打开编辑任务对话框失败: {str(e)}")
             logging.error(traceback.format_exc())
+
+    def copy_selected_task(self):
+        """Copy the selected scheduled task."""
+        try:
+            selected = self.scheduled_tree.selection()
+            if not selected:
+                messagebox.showwarning("提示", "请先选择要复制的任务")
+                return
+
+            task_id = self.scheduled_tree.item(selected[0])["values"][0]
+            new_task_id = self.task_manager.duplicate_task(task_id)
+            if new_task_id:
+                self.refresh_scheduled_tasks()
+                if self.is_running:
+                    self.task_manager.reschedule_all_tasks()
+                messagebox.showinfo("成功", "任务已复制")
+            else:
+                messagebox.showerror("错误", "复制任务失败")
+        except Exception as e:
+            logging.error(f"复制任务失败: {str(e)}")
+            logging.error(traceback.format_exc())
+            messagebox.showerror("错误", f"复制任务失败: {str(e)}")
 
     def delete_selected_task(self):
         """删除选中的任务"""
@@ -1911,7 +1998,7 @@ class TaskDialog:
         # 创建对话框窗口
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("编辑任务" if self.is_edit else "添加任务")
-        self.dialog.geometry("600x700")
+        self.dialog.geometry("650x780")
         self.dialog.resizable(False, False)
 
         # 设置为模态窗口
@@ -2082,7 +2169,17 @@ class TaskDialog:
         self.at_list_label.grid(row=row+1, column=1, sticky=tk.W)
         row += 2
 
-        # 消息内容
+        # 附件
+        ttk.Label(main_frame, text="附件:").grid(row=row, column=0, sticky=(tk.W, tk.N), pady=5)
+        file_frame = ttk.Frame(main_frame)
+        file_frame.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
+        self.file_paths_text = scrolledtext.ScrolledText(file_frame, height=4, width=40)
+        self.file_paths_text.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 5))
+        ttk.Button(file_frame, text="选择文件", command=self.browse_file_paths, width=10).grid(row=1, column=0, sticky=tk.W)
+        ttk.Button(file_frame, text="清空", command=self.clear_file_paths, width=8).grid(row=1, column=1, sticky=tk.W, padx=(5, 0))
+        file_frame.columnconfigure(0, weight=1)
+        row += 1
+
         ttk.Label(main_frame, text="消息内容:").grid(row=row, column=0, sticky=(tk.W, tk.N), pady=5)
         self.message_text = scrolledtext.ScrolledText(main_frame, height=10, width=40)
         self.message_text.grid(row=row, column=1, sticky=(tk.W, tk.E), pady=5)
@@ -2164,6 +2261,28 @@ class TaskDialog:
         """清空接收者列表"""
         self.recipient_var.set("")
 
+    def browse_file_paths(self):
+        """Select one or more files for the scheduled task."""
+        file_paths = filedialog.askopenfilenames(parent=self.dialog, title="选择附件")
+        if not file_paths:
+            return
+
+        current_paths = [
+            path.strip()
+            for path in self.file_paths_text.get("1.0", tk.END).splitlines()
+            if path.strip()
+        ]
+        for path in file_paths:
+            if path not in current_paths:
+                current_paths.append(path)
+
+        self.file_paths_text.delete("1.0", tk.END)
+        self.file_paths_text.insert("1.0", "\n".join(current_paths))
+
+    def clear_file_paths(self):
+        """Clear selected attachment paths."""
+        self.file_paths_text.delete("1.0", tk.END)
+
     def load_task_data(self):
         """加载任务数据到表单"""
         if not self.task:
@@ -2201,6 +2320,10 @@ class TaskDialog:
             else:
                 self.at_list_var.set(str(at_list))
 
+        file_paths = ScheduledTaskManager.normalize_file_paths(self.task.get("file_paths", []))
+        self.file_paths_text.delete("1.0", tk.END)
+        self.file_paths_text.insert("1.0", "\n".join(file_paths))
+
         self.message_text.delete("1.0", tk.END)
         self.message_text.insert("1.0", self.task.get("message", ""))
 
@@ -2223,11 +2346,24 @@ class TaskDialog:
                 return
 
             message = self.message_text.get("1.0", tk.END).strip()
-            if not message:
-                messagebox.showerror("错误", "请输入消息内容")
+            file_paths = [
+                path.strip().strip('"')
+                for path in self.file_paths_text.get("1.0", tk.END).splitlines()
+                if path.strip()
+            ]
+            if not message and not file_paths:
+                messagebox.showerror("错误", "请输入消息内容或选择附件")
                 return
 
             # 构建任务数据
+            for file_path in file_paths:
+                if not os.path.isabs(file_path):
+                    messagebox.showerror("错误", f"附件必须使用绝对路径: {file_path}")
+                    return
+                if not os.path.isfile(file_path):
+                    messagebox.showerror("错误", f"附件不存在: {file_path}")
+                    return
+
             hour = int(self.hour_var.get())
             minute = int(self.minute_var.get())
             time_str = f"{hour:02d}:{minute:02d}"
@@ -2248,6 +2384,7 @@ class TaskDialog:
                 "weekday": int(self.weekday_var.get()),
                 "recipient": recipient,
                 "message": message,
+                "file_paths": file_paths,
                 "is_group": self.is_group_var.get(),
                 "at_list": at_list
             }
