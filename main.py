@@ -761,8 +761,8 @@ server_thread = None
 # 初始化Flask应用
 flask_app = Flask(__name__)
 
-# 初始化微信
-wx = WeChat()
+# 微信实例会在确认微信已安装/登录后再初始化
+wx = None
 
 # 创建日志队列
 log_queue = queue.Queue()
@@ -831,6 +831,24 @@ def auto_open_wechat():
 
     except Exception as e:
         logging.error(f"自动打开微信失败: {str(e)}")
+        logging.error(traceback.format_exc())
+        return False
+
+
+def initialize_wechat():
+    """Initialize wxauto after the WeChat window is available."""
+    global wx
+    if wx is not None:
+        return True
+
+    try:
+        wx = WeChat()
+        logging.info("微信自动化初始化成功")
+        return True
+    except Exception as e:
+        wx = None
+        logging.error(f"微信自动化初始化失败: {str(e)}")
+        logging.error("请确认已安装微信 PC 版 3.9.x，并且已经登录到主界面")
         logging.error(traceback.format_exc())
         return False
 
@@ -2525,6 +2543,10 @@ if __name__ == "__main__":
         logging.error("请确保微信已正确安装并登录后再运行程序")
         time.sleep(5)  # 给用户时间查看错误信息
         sys.exit(1)  # 退出程序
+
+    if not initialize_wechat():
+        time.sleep(5)
+        sys.exit(1)
 
     # 创建并显示GUI协助
     root = tk.Tk()
