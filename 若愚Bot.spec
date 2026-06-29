@@ -1,13 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
-import sys
 import os
+import sys
 
-# 获取 Python 安装目录
-python_dir = os.path.dirname(sys.executable)
-dlls_dir = os.path.join(python_dir, 'DLLs')
 
-# 初始化
+python_roots = []
+for root in [os.path.dirname(sys.executable), sys.prefix, getattr(sys, 'base_prefix', '')]:
+    if root and root not in python_roots:
+        python_roots.append(root)
+
 datas = [('icon.ico', '.')]
 binaries = []
 hiddenimports = [
@@ -26,47 +27,37 @@ hiddenimports = [
     'win32process',
     'pywintypes',
     'schedule',
+    'tkinter',
+    'tkinter.scrolledtext',
     'wxauto',
 ]
 
-# 收集 wxauto 的所有资源
 tmp_ret = collect_all('wxauto')
 datas += tmp_ret[0]
 binaries += tmp_ret[1]
 hiddenimports += tmp_ret[2]
 
-# 收集 comtypes 的所有资源
 tmp_ret = collect_all('comtypes')
 datas += tmp_ret[0]
 binaries += tmp_ret[1]
 hiddenimports += tmp_ret[2]
 
-# 关键：手动添加 _ctypes.pyd 和相关 DLL
-print("\n正在查找必要的 DLL 文件...")
-if os.path.exists(dlls_dir):
-    # 添加 _ctypes.pyd
-    ctypes_pyd = os.path.join(dlls_dir, '_ctypes.pyd')
-    if os.path.exists(ctypes_pyd):
-        binaries.append((ctypes_pyd, '.'))
-        print(f"✓ 找到 _ctypes.pyd")
-    else:
-        print(f"✗ 未找到 _ctypes.pyd")
 
-    # 添加其他可能需要的 DLL
-    for dll_name in ['libffi-7.dll', 'libffi-8.dll', 'sqlite3.dll']:
-        dll_path = os.path.join(dlls_dir, dll_name)
-        if os.path.exists(dll_path):
-            binaries.append((dll_path, '.'))
-            print(f"✓ 找到 {dll_name}")
+def add_binary_if_exists(path, dest='.'):
+    if os.path.exists(path):
+        entry = (path, dest)
+        if entry not in binaries:
+            binaries.append(entry)
 
-# 添加 Python 根目录的 DLL
-for dll_name in ['python3.dll', 'python39.dll', 'python310.dll', 'python311.dll', 'python312.dll']:
-    dll_path = os.path.join(python_dir, dll_name)
-    if os.path.exists(dll_path):
-        binaries.append((dll_path, '.'))
-        print(f"✓ 找到 {dll_name}")
 
-print(f"\n总共添加了 {len(binaries)} 个二进制文件\n")
+for root in python_roots:
+    dlls_dir = os.path.join(root, 'DLLs')
+    for dll_name in ['_ctypes.pyd', 'libffi-7.dll', 'libffi-8.dll', 'sqlite3.dll']:
+        add_binary_if_exists(os.path.join(dlls_dir, dll_name))
+
+    for dll_name in ['python3.dll', 'python39.dll', 'python310.dll', 'python311.dll', 'python312.dll']:
+        add_binary_if_exists(os.path.join(root, dll_name))
+
 
 a = Analysis(
     ['main.py'],
@@ -84,7 +75,6 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-# 文件夹模式（onedir）- 推荐使用，DLL 加载更稳定
 exe = EXE(
     pyz,
     a.scripts,
