@@ -23,10 +23,38 @@ import chardet
 import schedule
 import uuid
 
+if getattr(sys, 'frozen', False):
+    os.chdir(Path(sys.executable).resolve().parent)
+
 try:
     from icon import icon_img  # Import the base64 encoded icon
 except ImportError:
     icon_img = None
+
+
+def split_name_list(value) -> List[str]:
+    """Split chat/user name lists by common separators and keep order."""
+    if not value:
+        return []
+
+    if isinstance(value, (list, tuple, set)):
+        items = []
+        for item in value:
+            items.extend(split_name_list(item))
+    else:
+        text = str(value)
+        for separator in ("\r", "\n", "，", "；", ";"):
+            text = text.replace(separator, ",")
+        items = text.split(",")
+
+    result = []
+    seen = set()
+    for item in items:
+        name = str(item).strip()
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
 
 
 # 配置管理
@@ -111,7 +139,7 @@ class Config:
                 self.config.write(f)
 
     def get_listen_list(self) -> List[str]:
-        return [x.strip() for x in self.config['DEFAULT']['listen_list'].split(',')]
+        return split_name_list(self.config['DEFAULT']['listen_list'])
 
     def get_webhook_urls(self) -> List[str]:
         return [x.strip() for x in self.config['DEFAULT']['webhook_urls'].split('\n') if x.strip()]
@@ -144,13 +172,11 @@ class Config:
     def get_task_admin_list(self) -> List[str]:
         """获取任务管理员列表"""
         admin_list = self.config['DEFAULT'].get('task_admin_list', '')
-        if not admin_list:
-            return []
-        return [x.strip() for x in admin_list.split(',') if x.strip()]
+        return split_name_list(admin_list)
 
     def set_task_admin_list(self, admins: List[str]):
         """设置任务管理员列表"""
-        self.config['DEFAULT']['task_admin_list'] = ','.join(admins)
+        self.config['DEFAULT']['task_admin_list'] = ','.join(split_name_list(admins))
         with open(self.config_path, 'w', encoding='utf-8') as f:
             self.config.write(f)
 
@@ -264,8 +290,8 @@ class TaskCommandParser:
         match = re.match(r'^@([^\s]+)\s+(.+)$', msg_content)
         if match:
             recipients_str, actual_msg = match.groups()
-            # 分割多个接收者（逗号分隔）
-            recipients = [r.strip() for r in recipients_str.split(',') if r.strip()]
+            # 分割多个接收者
+            recipients = split_name_list(recipients_str)
             return (recipients, actual_msg)
         else:
             # 没有 @，默认发给发送者自己
@@ -636,7 +662,7 @@ class ScheduledTaskManager:
 
             # 获取接收者列表（支持多个接收者，用逗号分隔）
             recipients_str = task['recipient']
-            recipients = [r.strip() for r in recipients_str.split(',') if r.strip()]
+            recipients = split_name_list(recipients_str)
 
             if not recipients:
                 logging.error(f"定时任务 {task['name']} 没有有效的接收者")
@@ -853,6 +879,24 @@ def initialize_wechat():
         return False
 
 
+def ensure_wechat_ready(show_dialog=False):
+    """Make sure WeChat is open and wxauto can attach to it."""
+    if not auto_open_wechat():
+        message = "请确保微信已正确安装并登录后再运行程序"
+        logging.error(message)
+        if show_dialog:
+            messagebox.showerror("微信未就绪", message)
+        return False
+
+    if not initialize_wechat():
+        message = "微信自动化初始化失败，请确认微信 PC 版已登录到主界面"
+        if show_dialog:
+            messagebox.showerror("微信初始化失败", message)
+        return False
+
+    return True
+
+
 class WeChatGUI:
     def __init__(self, root):
         self.root = root
@@ -891,6 +935,9 @@ class WeChatGUI:
         self.sessions = []
         self.last_session_update = 0
         self.session_update_interval = 60
+        self.listen_api_mode = None
+        self.listen_targets = set()
+        self.listen_poll_failures = {}
 
         # 消息处理相关
         self.message_queue = queue.Queue()
@@ -926,6 +973,11 @@ class WeChatGUI:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        self.root.after(300, self.startup_wechat_check)
+
+    def startup_wechat_check(self):
+        """Run a visible startup check instead of exiting before the GUI appears."""
+        ensure_wechat_ready(show_dialog=True)
 
     def create_widgets(self):
         # 创建样式
@@ -1198,13 +1250,13 @@ class WeChatGUI:
     def get_listen_list(self):
         """从文本框获取监听对象列表"""
         text = self.listen_text.get("1.0", tk.END).strip()
-        if not text:
-            return []
-        # 按行分割，去除空行和空白字符
-        return [line.strip() for line in text.split('\n') if line.strip()]
+        return split_name_list(text)
 
     def start_service(self):
         if not self.is_running:
+            if not ensure_wechat_ready(show_dialog=True):
+                return
+
             # 获取监听对象列表
             listen_list = self.get_listen_list()
 
@@ -1215,12 +1267,9 @@ class WeChatGUI:
                 for task in tasks:
                     if task.get('enabled', False):
                         recipient = task.get('recipient', '')
-                        if recipient:
-                            # 处理多接收者（逗号分隔）
-                            recipients = [r.strip() for r in recipient.split(',') if r.strip()]
-                            for r in recipients:
-                                if r not in scheduled_recipients:
-                                    scheduled_recipients.append(r)
+                        for r in split_name_list(recipient):
+                            if r not in scheduled_recipients:
+                                scheduled_recipients.append(r)
 
             # 检查是否至少有一个监听对象或定时任务接收者
             if not listen_list and not scheduled_recipients:
@@ -1309,12 +1358,177 @@ class WeChatGUI:
                         try:
                             # 检查是否已经在监听列表中
                             if session.name not in self.get_listen_list():
-                                wx.AddListenChat(nickname=session.name, callback=self.handle_message_callback)
+                                self.add_listen_chat(session.name)
                                 logging.info(f"已添加新会话监听: {session.name}")
                         except Exception as e:
                             logging.error(f"添加新会话监听失败: {str(e)}")
         except Exception as e:
             logging.error(f"更新会话列表失败: {str(e)}")
+
+    def add_listen_chat(self, who):
+        """Add a listen target using either callback or polling wxauto APIs."""
+        if not who:
+            return False
+        who = str(who).strip()
+        if who in self.listen_targets:
+            return True
+
+        if hasattr(wx, 'StartListening'):
+            try:
+                wx.AddListenChat(nickname=who, callback=self.handle_message_callback)
+                self.listen_api_mode = self.listen_api_mode or 'callback'
+                self.listen_targets.add(who)
+                return True
+            except TypeError as e:
+                logging.warning(f"当前wxauto不支持回调监听参数，切换到轮询模式: {str(e)}")
+
+        return self.add_listen_chat_polling(who)
+
+    def add_listen_chat_polling(self, who, max_retries=3):
+        """Add a listen target with the old wxauto polling API, with UI retries."""
+        self.listen_api_mode = 'polling'
+        last_error = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                self.add_listen_chat_polling_once(who)
+                self.listen_targets.add(who)
+                return True
+            except Exception as e:
+                last_error = e
+                logging.warning(f"添加监听 {who} 第 {attempt}/{max_retries} 次失败: {str(e)}")
+                if attempt < max_retries:
+                    try:
+                        if hasattr(wx, '_refresh'):
+                            wx._refresh()
+                        elif hasattr(wx, 'SwitchToChat'):
+                            wx.SwitchToChat()
+                    except Exception as refresh_error:
+                        logging.debug(f"刷新微信窗口失败: {refresh_error}")
+                    time.sleep(1.5)
+
+        raise RuntimeError(
+            f"旧版wxauto添加监听失败，请确认微信里能搜到“{who}”，名称/备注完全一致。最后错误: {last_error}"
+        )
+
+    def add_listen_chat_polling_once(self, who):
+        """One old wxauto listen attempt. Raises a clear error when the UI target is missing."""
+        try:
+            from wxauto.wxauto import ChatWnd, uia
+        except Exception:
+            wx.AddListenChat(who)
+            self.listen_targets.add(who)
+            return True
+
+        if not hasattr(wx, 'listen') or not isinstance(wx.listen, dict):
+            wx.AddListenChat(who)
+            return True
+
+        if who in wx.listen:
+            return True
+
+        import re as _re
+
+        chat_name = wx.ChatWith(who)
+        if not chat_name:
+            raise RuntimeError(f"微信搜索不到该聊天对象: {who}")
+
+        listen_name = str(chat_name).strip() or who
+        chat_window = uia.WindowControl(searchDepth=1, ClassName='ChatWnd', Name=listen_name)
+
+        if not chat_window.Exists(maxSearchSeconds=0.5):
+            session_item = wx.SessionBox.ListItemControl(RegexName=_re.escape(listen_name))
+            if not session_item.Exists(maxSearchSeconds=2):
+                session_item = wx.SessionBox.ListItemControl(RegexName=_re.escape(who))
+            if not session_item.Exists(maxSearchSeconds=2):
+                raise RuntimeError(f"会话列表里找不到该聊天对象: {listen_name}")
+
+            session_item.DoubleClick(simulateMove=False)
+            time.sleep(0.8)
+            chat_window = uia.WindowControl(searchDepth=1, ClassName='ChatWnd', Name=listen_name)
+            if not chat_window.Exists(maxSearchSeconds=3) and listen_name != who:
+                chat_window = uia.WindowControl(searchDepth=1, ClassName='ChatWnd', Name=who)
+                if chat_window.Exists(maxSearchSeconds=1):
+                    listen_name = who
+            if not chat_window.Exists(maxSearchSeconds=1):
+                raise RuntimeError(f"打开监听子窗口超时: {listen_name}")
+
+        chat = ChatWnd(listen_name, wx.language)
+        chat.savepic = False
+        chat.savefile = False
+        chat.savevoice = False
+        wx.listen[who] = chat
+        self.listen_targets.add(who)
+        return True
+
+    def poll_listen_messages(self):
+        """Poll old wxauto listen messages and dispatch them through the callback handler."""
+        if not hasattr(wx, 'GetListenMessage'):
+            return
+
+        listen_chats = getattr(wx, 'listen', None)
+        if isinstance(listen_chats, dict) and listen_chats:
+            for target, chat in list(listen_chats.items()):
+                try:
+                    chat_messages = chat.GetNewMessage(
+                        savepic=getattr(chat, 'savepic', False),
+                        savefile=getattr(chat, 'savefile', False),
+                        savevoice=getattr(chat, 'savevoice', False)
+                    )
+                    self.listen_poll_failures.pop(target, None)
+                    if not chat_messages:
+                        continue
+                    for msg in chat_messages:
+                        self.handle_message_callback(msg, chat)
+                except Exception as e:
+                    failure_count = self.listen_poll_failures.get(target, 0) + 1
+                    self.listen_poll_failures[target] = failure_count
+                    if failure_count in (1, 3) or failure_count % 30 == 0:
+                        logging.error(f"获取监听消息失败: {target} - {str(e)}")
+            return
+
+        messages = wx.GetListenMessage()
+        if not messages:
+            return
+
+        if isinstance(messages, dict):
+            for chat, chat_messages in messages.items():
+                if not chat_messages:
+                    continue
+                for msg in chat_messages:
+                    self.handle_message_callback(msg, chat)
+            return
+
+        if isinstance(messages, list):
+            for msg in messages:
+                self.handle_message_callback(msg, None)
+
+    def send_files_compatible(self, filepath, who):
+        """Send files across wxauto versions with different SendFiles signatures."""
+        try:
+            return wx.SendFiles(filepath=filepath, who=who, exact=False)
+        except TypeError as e:
+            if 'exact' not in str(e):
+                raise
+            return wx.SendFiles(filepath=filepath, who=who)
+
+    @staticmethod
+    def is_at_all_list(at_list):
+        """Return whether the configured @ list means @所有人."""
+        if isinstance(at_list, str):
+            return at_list.strip().lower() in ('all', '@all', '所有人', '@所有人')
+        if isinstance(at_list, list) and len(at_list) == 1:
+            return WeChatGUI.is_at_all_list(at_list[0])
+        return False
+
+    def at_all_compatible(self, msg, who, exact=False):
+        """Call wxauto AtAll across versions with different signatures."""
+        try:
+            return wx.AtAll(msg=msg, who=who, exact=exact)
+        except TypeError as e:
+            if 'exact' not in str(e):
+                raise
+            return wx.AtAll(msg=msg, who=who)
 
     def generate_message_id(self, chat_name, sender, content, timestamp):
         """生成消息唯一ID"""
@@ -1379,18 +1593,17 @@ class WeChatGUI:
                         logging.info(f"- @列表: {at_list}")
 
                 # 根据是否是群聊和是否有@列表来决定发送方式
-                if content and is_group:
-                    # 群聊消息
-                    if at_list:
-                        if at_list == ['all']:
-                            # @所有人
-                            wx.SendMsg(msg=content, who=who, at=at_list)
-                        else:
-                            # @指定成员
-                            wx.SendMsg(msg=content, who=who, at=at_list)
+                if is_group and at_list:
+                    if self.is_at_all_list(at_list):
+                        # @所有人
+                        response = self.at_all_compatible(msg=content or None, who=who)
+                        logging.info(f"@所有人发送结果: {response}")
                     else:
-                        # 普通群聊消息
-                        wx.SendMsg(msg=content, who=who)
+                        # @指定成员；允许附件任务没有文字内容时只发送@
+                        wx.SendMsg(msg=content, who=who, at=at_list)
+                elif content and is_group:
+                    # 普通群聊消息
+                    wx.SendMsg(msg=content, who=who)
                 elif content:
                     # 私聊消息
                     wx.SendMsg(msg=content, who=who)
@@ -1398,7 +1611,7 @@ class WeChatGUI:
                 # 发送后等待一段时间，确保消息发送完成
                 if file_paths:
                     filepath = file_paths[0] if len(file_paths) == 1 else file_paths
-                    response = wx.SendFiles(filepath=filepath, who=who, exact=False)
+                    response = self.send_files_compatible(filepath=filepath, who=who)
                     logging.info(f"附件发送结果: {response}")
 
                 time.sleep(0.5)
@@ -1727,6 +1940,13 @@ class WeChatGUI:
             logging.error(traceback.format_exc())
 
     def message_listener(self):
+        self.listen_api_mode = None
+        self.listen_targets.clear()
+        if hasattr(self, 'listen_poll_failures'):
+            self.listen_poll_failures.clear()
+        if hasattr(wx, 'listen') and isinstance(wx.listen, dict):
+            wx.listen.clear()
+
         # 获取主控制页面的监听对象列表
         listen_list = self.get_listen_list()
 
@@ -1737,14 +1957,15 @@ class WeChatGUI:
             for task in tasks:
                 if task.get('enabled', False):  # 只添加启用的任务的接收者
                     recipient = task.get('recipient', '')
-                    if recipient and recipient not in scheduled_recipients:
-                        scheduled_recipients.append(recipient)
+                    for r in split_name_list(recipient):
+                        if r not in scheduled_recipients:
+                            scheduled_recipients.append(r)
 
         # 获取任务管理员列表
         task_admins = config.get_task_admin_list()
 
         # 合并并去重监听列表（包括监听对象、定时任务接收者、任务管理员）
-        combined_list = list(set(listen_list + scheduled_recipients + task_admins))
+        combined_list = split_name_list(listen_list + scheduled_recipients + task_admins)
 
         if scheduled_recipients:
             logging.info(f"从定时任务中添加了 {len(scheduled_recipients)} 个接收者到监听列表")
@@ -1765,26 +1986,40 @@ class WeChatGUI:
         my_nickname = wx.nickname
         logging.info(f"我的昵称: {my_nickname}")
 
-        # 添加监听对象（使用新的API）
+        # 添加监听对象（兼容回调模式和旧版轮询模式）
+        listen_success_count = 0
+        listen_failed_targets = []
         for who in combined_list:
             try:
-                wx.AddListenChat(nickname=who, callback=self.handle_message_callback)
-                logging.info(f"已添加监听: {who}")
+                if self.add_listen_chat(who):
+                    listen_success_count += 1
+                    logging.info(f"已添加监听: {who}")
             except Exception as e:
+                listen_failed_targets.append(who)
                 logging.error(f"添加监听 {who} 失败: {str(e)}")
+
+        logging.info(f"监听添加完成：成功 {listen_success_count} 个，失败 {len(listen_failed_targets)} 个")
+        if listen_failed_targets:
+            logging.warning(f"监听失败对象: {', '.join(listen_failed_targets)}")
 
         logging.info("开始监听消息...")
 
-        # 启动监听
-        try:
-            wx.StartListening()
-            logging.info("监听已启动")
-        except Exception as e:
-            logging.error(f"启动监听失败: {str(e)}")
+        callback_mode = self.listen_api_mode == 'callback' and hasattr(wx, 'StartListening')
+        if callback_mode:
+            try:
+                wx.StartListening()
+                logging.info("监听已启动（回调模式）")
+            except Exception as e:
+                logging.error(f"启动监听失败: {str(e)}")
+                callback_mode = False
+        else:
+            logging.info("当前为旧版wxauto，使用GetListenMessage轮询模式（正常）")
 
         # 保持运行
         while self.is_running:
             try:
+                if not callback_mode:
+                    self.poll_listen_messages()
                 time.sleep(1)
             except Exception as e:
                 logging.error(f"监听循环出错: {str(e)}")
@@ -1792,11 +2027,12 @@ class WeChatGUI:
                 time.sleep(5)
 
         # 停止监听
-        try:
-            wx.StopListening()
-            logging.info("监听已停止")
-        except Exception as e:
-            logging.error(f"停止监听失败: {str(e)}")
+        if callback_mode and hasattr(wx, 'StopListening'):
+            try:
+                wx.StopListening()
+                logging.info("监听已停止")
+            except Exception as e:
+                logging.error(f"停止监听失败: {str(e)}")
 
     def update_webhook_url(self):
         """更新当前webhook URL显示"""
@@ -1854,7 +2090,7 @@ class WeChatGUI:
     def update_task_admin_list(self):
         """更新任务管理员列表"""
         try:
-            admins = [admin.strip() for admin in self.task_admin_text.get("1.0", tk.END).split('\n') if admin.strip()]
+            admins = split_name_list(self.task_admin_text.get("1.0", tk.END))
             config.set_task_admin_list(admins)
             if admins:
                 logging.info(f"任务管理员列表已更新: {', '.join(admins)}")
@@ -2265,7 +2501,7 @@ class TaskDialog:
 
             # 检查是否已经存在
             if current_recipients:
-                recipients_list = [r.strip() for r in current_recipients.split(',')]
+                recipients_list = split_name_list(current_recipients)
                 if selected_item not in recipients_list:
                     recipients_list.append(selected_item)
                     self.recipient_var.set(', '.join(recipients_list))
@@ -2393,7 +2629,7 @@ class TaskDialog:
                     if at_list_str.lower() == "all":
                         at_list = ["all"]
                     else:
-                        at_list = [x.strip() for x in at_list_str.split(",") if x.strip()]
+                        at_list = split_name_list(at_list_str)
 
             task_data = {
                 "name": name,
@@ -2538,16 +2774,6 @@ def handle_webhook():
 
 
 if __name__ == "__main__":
-    # 自动打开微信
-    if not auto_open_wechat():
-        logging.error("请确保微信已正确安装并登录后再运行程序")
-        time.sleep(5)  # 给用户时间查看错误信息
-        sys.exit(1)  # 退出程序
-
-    if not initialize_wechat():
-        time.sleep(5)
-        sys.exit(1)
-
     # 创建并显示GUI协助
     root = tk.Tk()
     app = WeChatGUI(root)
